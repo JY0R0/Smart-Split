@@ -1,0 +1,86 @@
+generator client {
+  provider = "prisma-client-js"
+  engineType = "binary"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model User {
+  id           Int             @id @default(autoincrement())
+  name         String
+  email        String          @unique
+  password     String
+  createdGroups Group[]         @relation("GroupCreator")
+  groupMembers  GroupMember[]
+  paidExpenses  Expense[]       @relation("ExpensePayer")
+  expenseSplits ExpenseSplit[]
+  settlementsAsPayer    Settlement[] @relation("SettlementPayer")
+  settlementsAsReceiver Settlement[] @relation("SettlementReceiver")
+
+  @@map("users")
+}
+
+model Group {
+  id          Int           @id @default(autoincrement())
+  name        String
+  createdById Int
+  createdBy   User          @relation("GroupCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  members     GroupMember[]
+  expenses    Expense[]
+
+  @@index([createdById])
+  @@map("groups")
+}
+
+model GroupMember {
+  groupId Int
+  userId  Int
+  group   Group  @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([groupId, userId])
+  @@index([userId])
+  @@map("group_members")
+}
+
+model Expense {
+  id        Int            @id @default(autoincrement())
+  title     String
+  amount    Decimal
+  paidById  Int
+  groupId   Int
+  paidBy    User           @relation("ExpensePayer", fields: [paidById], references: [id], onDelete: Restrict)
+  group     Group          @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  splits    ExpenseSplit[]
+
+  @@index([paidById])
+  @@index([groupId])
+  @@map("expenses")
+}
+
+model ExpenseSplit {
+  expenseId Int
+  userId    Int
+  amount    Decimal
+  expense   Expense  @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([expenseId, userId])
+  @@index([userId])
+  @@map("expense_splits")
+}
+
+model Settlement {
+  id         Int      @id @default(autoincrement())
+  payerId    Int
+  receiverId Int
+  amount     Decimal
+  payer      User     @relation("SettlementPayer", fields: [payerId], references: [id], onDelete: Cascade)
+  receiver   User     @relation("SettlementReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@index([payerId])
+  @@index([receiverId])
+  @@map("settlements")
+}

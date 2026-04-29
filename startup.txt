@@ -1,0 +1,6 @@
+server
+cd C:\Users\boral\Jyo\Projects\2\server
+node server.js
+Frontend
+cd C:\Users\boral\Jyo\Projects\2\client\EOM-Split
+npm run dev -- --host 127.0.0.1 --port 5173
