@@ -3,33 +3,13 @@ import { Routes, Route, Link, Navigate } from 'react-router-dom'
 import { Login, Register, Dashboard, Groups, Expenses, Settlements, Profile } from './Pages'
 import { useAuth } from './context/AuthContext'
 import ProtectedRoute from './components/ProtectedRoute'
+import AppShell from './layouts/AppShell'
 
 export default function App() {
   const { isAuthenticated, logout, user } = useAuth()
 
   return (
     <div className="app-root">
-      <header className="app-header">
-        <nav>
-          {isAuthenticated ? (
-            <>
-              <Link to="/dashboard">Dashboard</Link> |{' '}
-              <Link to="/groups">Groups</Link> |{' '}
-              <Link to="/expenses">Expenses</Link> |{' '}
-              <Link to="/settlements">Settlements</Link> |{' '}
-              <Link to="/profile">Profile</Link> |{' '}
-              <span>{user?.name || 'User'}</span> |{' '}
-              <button type="button" onClick={logout}>Logout</button>
-            </>
-          ) : (
-            <>
-              <Link to="/login">Login</Link> |{' '}
-              <Link to="/register">Register</Link>
-            </>
-          )}
-        </nav>
-      </header>
-
       <main>
         <Routes>
           <Route
@@ -48,7 +28,9 @@ export default function App() {
             path="/dashboard"
             element={
               <ProtectedRoute>
-                <Dashboard />
+                <AppShell user={user} onLogout={logout}>
+                  <Dashboard />
+                </AppShell>
               </ProtectedRoute>
             }
           />
@@ -56,7 +38,9 @@ export default function App() {
             path="/groups"
             element={
               <ProtectedRoute>
-                <Groups />
+                <AppShell user={user} onLogout={logout}>
+                  <Groups />
+                </AppShell>
               </ProtectedRoute>
             }
           />
@@ -64,7 +48,9 @@ export default function App() {
             path="/expenses"
             element={
               <ProtectedRoute>
-                <Expenses />
+                <AppShell user={user} onLogout={logout}>
+                  <Expenses />
+                </AppShell>
               </ProtectedRoute>
             }
           />
@@ -72,7 +58,9 @@ export default function App() {
             path="/settlements"
             element={
               <ProtectedRoute>
-                <Settlements />
+                <AppShell user={user} onLogout={logout}>
+                  <Settlements />
+                </AppShell>
               </ProtectedRoute>
             }
           />
@@ -80,7 +68,9 @@ export default function App() {
             path="/profile"
             element={
               <ProtectedRoute>
-                <Profile />
+                <AppShell user={user} onLogout={logout}>
+                  <Profile />
+                </AppShell>
               </ProtectedRoute>
             }
           />
