@@ -1,23 +1,57 @@
-import React, { createContext, useContext, useMemo, useState } from 'react'
+import React, { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import { clearSession, getStoredUser, getToken, saveSession } from '../services/authStorage'
 import apiClient from '../services/apiClient'
 
 const AuthContext = createContext(null)
 
+function withRole(user) {
+  if (!user) {
+    return null
+  }
+
+  return {
+    ...user,
+    role: user.role || 'user',
+  }
+}
+
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(getStoredUser())
+  const [user, setUser] = useState(withRole(getStoredUser()))
   const [token, setToken] = useState(getToken())
 
   const isAuthenticated = Boolean(token)
 
+  useEffect(() => {
+    async function hydrateRole() {
+      if (!token || !user || user.role) {
+        return
+      }
+
+      try {
+        const { data } = await apiClient.get('/protected')
+        const nextUser = withRole({ ...user, role: data?.user?.role })
+        saveSession({ token, user: nextUser })
+        setUser(nextUser)
+      } catch {
+        // Keep existing session state if profile hydration fails.
+      }
+    }
+
+    hydrateRole()
+  }, [token, user])
+
   async function login({ email, password }) {
     const { data: payload } = await apiClient.post('/auth/login', { email, password })
+    const nextUser = withRole(payload.user)
 
-    saveSession({ token: payload.token, user: payload.user })
+    saveSession({ token: payload.token, user: nextUser })
     setToken(payload.token)
-    setUser(payload.user)
+    setUser(nextUser)
 
-    return payload
+    return {
+      ...payload,
+      user: nextUser,
+    }
   }
 
   async function register({ name, email, password }) {
@@ -26,12 +60,16 @@ export function AuthProvider({ children }) {
       email,
       password,
     })
+    const nextUser = withRole(payload.user)
 
-    saveSession({ token: payload.token, user: payload.user })
+    saveSession({ token: payload.token, user: nextUser })
     setToken(payload.token)
-    setUser(payload.user)
+    setUser(nextUser)
 
-    return payload
+    return {
+      ...payload,
+      user: nextUser,
+    }
   }
 
   function logout() {

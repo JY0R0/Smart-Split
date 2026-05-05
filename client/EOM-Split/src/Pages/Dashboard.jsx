@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState, useCallback } from 'react'
 import {
   Chart as ChartJS,
   ArcElement,
@@ -16,6 +16,7 @@ import apiClient from '../services/apiClient'
 import ExpenseCard from '../components/ExpenseCard'
 import GroupCard from '../components/GroupCard'
 import Modal from '../components/Modal'
+import AddExpenseForm from '../components/AddExpenseForm'
 
 ChartJS.register(
   ArcElement,
@@ -28,15 +29,6 @@ ChartJS.register(
   Tooltip,
   Legend
 )
-
-const FALLBACK_EXPENSES = [
-  { id: 1, title: 'Groceries', amount: 1200, groupId: 1, groupName: 'Home', createdAt: '2026-01-12' },
-  { id: 2, title: 'Cab Ride', amount: 450, groupId: 1, groupName: 'Home', createdAt: '2026-02-10' },
-  { id: 3, title: 'Trip Dinner', amount: 2400, groupId: 2, groupName: 'Travel', createdAt: '2026-03-18' },
-  { id: 4, title: 'Movie Tickets', amount: 900, groupId: 3, groupName: 'Friends', createdAt: '2026-03-25' },
-  { id: 5, title: 'Electric Bill', amount: 1800, groupId: 1, groupName: 'Home', createdAt: '2026-04-03' },
-  { id: 6, title: 'Flight', amount: 6400, groupId: 2, groupName: 'Travel', createdAt: '2026-04-08' },
-]
 
 const COLORS = ['#0f766e', '#6366f1', '#2563eb', '#d97706', '#ec4899', '#0ea5e9']
 
@@ -104,58 +96,45 @@ export default function Dashboard() {
   const [showModal, setShowModal] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [usingFallback, setUsingFallback] = useState(false)
+
+  const loadDashboard = useCallback(async () => {
+    try {
+      setLoading(true)
+      setError('')
+
+      const { data: groupsPayload } = await apiClient.get('/groups')
+      const groups = groupsPayload.groups || []
+
+      const expenseRequests = groups.map(async (group) => {
+        try {
+          const { data: payload } = await apiClient.get(`/groups/${group.id}/expenses`)
+          return (payload.expenses || []).map((expense) => ({
+            ...expense,
+            groupName: group.name,
+          }))
+        } catch {
+          return []
+        }
+      })
+
+      const allExpenseGroups = await Promise.all(expenseRequests)
+      setExpenses(allExpenseGroups.flat())
+    } catch (loadError) {
+      setExpenses([])
+      setError(loadError.message || 'Failed to load dashboard data.')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
 
   useEffect(() => {
-    async function loadDashboard() {
-      try {
-        setLoading(true)
-        setError('')
-
-        const token = localStorage.getItem('token') || localStorage.getItem('authToken')
-        if (!token) {
-          setUsingFallback(true)
-          setExpenses(FALLBACK_EXPENSES)
-          return
-        }
-
-        const { data: groupsPayload } = await apiClient.get('/groups')
-        const groups = groupsPayload.groups || []
-
-        const expenseRequests = groups.map(async (group) => {
-          try {
-            const { data: payload } = await apiClient.get(`/groups/${group.id}/expenses`)
-            return (payload.expenses || []).map((expense) => ({
-              ...expense,
-              groupName: group.name,
-            }))
-          } catch {
-            return []
-          }
-        })
-
-        const allExpenseGroups = await Promise.all(expenseRequests)
-        const mergedExpenses = allExpenseGroups.flat()
-
-        if (mergedExpenses.length === 0) {
-          setUsingFallback(true)
-          setExpenses(FALLBACK_EXPENSES)
-          return
-        }
-
-        setUsingFallback(false)
-        setExpenses(mergedExpenses)
-      } catch (loadError) {
-        setUsingFallback(true)
-        setExpenses(FALLBACK_EXPENSES)
-        setError(loadError.message || 'Failed to load dashboard data.')
-      } finally {
-        setLoading(false)
-      }
-    }
-
     loadDashboard()
-  }, [])
+  }, [loadDashboard])
+
+  function handleExpenseAdded() {
+    setShowModal(false)
+    loadDashboard()
+  }
 
   const summary = useMemo(() => {
     const totalSpent = expenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0)
@@ -272,6 +251,8 @@ export default function Dashboard() {
     )
   }
 
+  const hasData = expenses.length > 0
+
   const statCards = [
     { label: 'Total Spent', value: `₹${summary.totalSpent}`, icon: '💸' },
     { label: 'Groups', value: `${summary.groupsCount} groups`, icon: '👥' },
@@ -293,130 +274,120 @@ export default function Dashboard() {
         </button>
       </section>
 
-      {/* Info banners */}
-      {usingFallback && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-          📊 Showing sample data — add expenses to your groups to see real data here.
-        </div>
-      )}
+      {/* Error banner */}
       {error && (
         <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
           {error}
         </div>
       )}
 
+      {/* Empty state */}
+      {!hasData && (
+        <div className="flex flex-col items-center justify-center gap-4 rounded-2xl border border-dashed border-slate-300 bg-white/50 py-16">
+          <span className="text-5xl">📊</span>
+          <div className="text-center">
+            <p className="text-base font-semibold text-slate-700">No expenses yet</p>
+            <p className="mt-1 text-sm text-slate-400">
+              Create a group, add members, and start splitting expenses to see your analytics here.
+            </p>
+          </div>
+          <button type="button" className="btn btn-primary" onClick={() => setShowModal(true)}>
+            + Add Your First Expense
+          </button>
+        </div>
+      )}
+
       {/* Stat cards */}
-      <section className="grid grid-cols-2 gap-3 xl:grid-cols-4">
-        {statCards.map((card) => (
-          <article className="dashboard-card" key={card.label}>
-            <div className="flex items-center gap-2">
-              <span className="text-lg">{card.icon}</span>
-              <h3>{card.label}</h3>
-            </div>
-            <p>{card.value}</p>
-          </article>
-        ))}
-      </section>
+      {hasData && (
+        <>
+          <section className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+            {statCards.map((card) => (
+              <article className="dashboard-card" key={card.label}>
+                <div className="flex items-center gap-2">
+                  <span className="text-lg">{card.icon}</span>
+                  <h3>{card.label}</h3>
+                </div>
+                <p>{card.value}</p>
+              </article>
+            ))}
+          </section>
 
-      {/* Charts */}
-      <section className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <article className="dashboard-panel">
-          <h2>Spending by Group</h2>
-          <div className="relative mx-auto" style={{ height: '280px', maxWidth: '320px' }}>
-            <Pie data={groupPieData} options={{ ...chartOptions, maintainAspectRatio: false }} />
-          </div>
-        </article>
+          {/* Charts */}
+          <section className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <article className="dashboard-panel">
+              <h2>Spending by Group</h2>
+              <div className="relative mx-auto" style={{ height: '280px', maxWidth: '320px' }}>
+                <Pie data={groupPieData} options={{ ...chartOptions, maintainAspectRatio: false }} />
+              </div>
+            </article>
 
-        <article className="dashboard-panel">
-          <h2>Monthly Trend</h2>
-          <div style={{ height: '280px' }}>
-            <Line data={monthlyTrendData} options={lineOptions} />
-          </div>
-        </article>
+            <article className="dashboard-panel">
+              <h2>Monthly Trend</h2>
+              <div style={{ height: '280px' }}>
+                <Line data={monthlyTrendData} options={lineOptions} />
+              </div>
+            </article>
 
-        <article className="dashboard-panel xl:col-span-2">
-          <h2>Category Breakdown</h2>
-          <div style={{ height: '280px' }}>
-            <Bar data={categoryChartData} options={barOptions} />
-          </div>
-        </article>
-      </section>
+            <article className="dashboard-panel xl:col-span-2">
+              <h2>Category Breakdown</h2>
+              <div style={{ height: '280px' }}>
+                <Bar data={categoryChartData} options={barOptions} />
+              </div>
+            </article>
+          </section>
 
-      {/* Recent & Groups */}
-      <section className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <article className="dashboard-panel">
-          <h2>Recent Expenses</h2>
-          {recentExpenses.length === 0 ? (
-            <p className="text-sm text-slate-400">No expenses yet.</p>
-          ) : (
-            <div className="stack">
-              {recentExpenses.map((expense) => (
-                <ExpenseCard
-                  key={expense.id}
-                  title={expense.title}
-                  amount={expense.amount}
-                  groupName={expense.groupName || `Group ${expense.groupId}`}
-                  paidByName={expense.paidByName || 'You'}
-                  date={expense.createdAt || 'Recently added'}
-                  category={classifyCategory(expense.title)}
-                />
-              ))}
-            </div>
-          )}
-        </article>
+          {/* Recent & Groups */}
+          <section className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <article className="dashboard-panel">
+              <h2>Recent Expenses</h2>
+              {recentExpenses.length === 0 ? (
+                <p className="text-sm text-slate-400">No expenses yet.</p>
+              ) : (
+                <div className="stack">
+                  {recentExpenses.map((expense) => (
+                    <ExpenseCard
+                      key={expense.id}
+                      title={expense.title}
+                      amount={expense.amount}
+                      groupName={expense.groupName || `Group ${expense.groupId}`}
+                      paidByName={expense.paidByName || 'You'}
+                      date={expense.createdAt || 'Recently added'}
+                      category={classifyCategory(expense.title)}
+                    />
+                  ))}
+                </div>
+              )}
+            </article>
 
-        <article className="dashboard-panel">
-          <h2>Top Groups</h2>
-          {groupHighlights.length === 0 ? (
-            <p className="text-sm text-slate-400">No groups yet.</p>
-          ) : (
-            <div className="stack">
-              {groupHighlights.map((group, index) => (
-                <GroupCard
-                  key={group.name}
-                  name={group.name}
-                  members={group.members.size || 1}
-                  balance={`₹${group.total.toLocaleString('en-IN', { minimumFractionDigits: 2 })} spent`}
-                  accent={index === 0 ? 'teal' : index === 1 ? 'amber' : 'indigo'}
-                />
-              ))}
-            </div>
-          )}
-        </article>
-      </section>
+            <article className="dashboard-panel">
+              <h2>Top Groups</h2>
+              {groupHighlights.length === 0 ? (
+                <p className="text-sm text-slate-400">No groups yet.</p>
+              ) : (
+                <div className="stack">
+                  {groupHighlights.map((group, index) => (
+                    <GroupCard
+                      key={group.name}
+                      name={group.name}
+                      members={group.members.size || 1}
+                      balance={`₹${group.total.toLocaleString('en-IN', { minimumFractionDigits: 2 })} spent`}
+                      accent={index === 0 ? 'teal' : index === 1 ? 'amber' : 'indigo'}
+                    />
+                  ))}
+                </div>
+              )}
+            </article>
+          </section>
+        </>
+      )}
 
       {/* Quick Add Modal */}
       <Modal
         title="Quick Add Expense"
         open={showModal}
         onClose={() => setShowModal(false)}
-        footer={
-          <button type="button" className="btn btn-primary" onClick={() => setShowModal(false)}>
-            Done
-          </button>
-        }
       >
-        <form className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <label className="grid gap-1.5">
-            <span className="text-sm font-semibold text-slate-700">Title</span>
-            <input className="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm outline-none transition-all placeholder:text-slate-400 focus:border-teal-400 focus:bg-white focus:ring-4 focus:ring-teal-100" type="text" placeholder="Dinner, cab, groceries…" />
-          </label>
-          <label className="grid gap-1.5">
-            <span className="text-sm font-semibold text-slate-700">Amount</span>
-            <input className="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm outline-none transition-all placeholder:text-slate-400 focus:border-teal-400 focus:bg-white focus:ring-4 focus:ring-teal-100" type="number" placeholder="1200" />
-          </label>
-          <label className="grid gap-1.5">
-            <span className="text-sm font-semibold text-slate-700">Group</span>
-            <input className="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm outline-none transition-all placeholder:text-slate-400 focus:border-teal-400 focus:bg-white focus:ring-4 focus:ring-teal-100" type="text" placeholder="Travel group" />
-          </label>
-          <label className="grid gap-1.5">
-            <span className="text-sm font-semibold text-slate-700">Split type</span>
-            <select className="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm outline-none transition-all focus:border-teal-400 focus:bg-white focus:ring-4 focus:ring-teal-100" defaultValue="equal">
-              <option value="equal">Equal</option>
-              <option value="custom">Custom</option>
-            </select>
-          </label>
-        </form>
+        <AddExpenseForm onSuccess={handleExpenseAdded} />
       </Modal>
     </section>
   )

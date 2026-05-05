@@ -4,3 +4,7 @@ node server.js
 Frontend
 cd C:\Users\boral\Jyo\Projects\2\client\EOM-Split
 npm run dev -- --host 127.0.0.1 --port 5173
+
+Default admin account (auto-created on server start)
+email: admin@smartsplit.local
+password: Admin@123

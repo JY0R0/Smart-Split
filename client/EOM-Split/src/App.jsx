@@ -1,12 +1,14 @@
 import React from 'react'
-import { Routes, Route, Link, Navigate } from 'react-router-dom'
-import { Login, Register, Dashboard, Groups, Expenses, Settlements, Profile } from './Pages'
+import { Routes, Route, Navigate } from 'react-router-dom'
+import { Login, Register, Dashboard, Groups, Expenses, Settlements, Profile, AdminDashboard } from './Pages'
 import { useAuth } from './context/AuthContext'
 import ProtectedRoute from './components/ProtectedRoute'
 import AppShell from './layouts/AppShell'
 
 export default function App() {
   const { isAuthenticated, logout, user } = useAuth()
+  const isAdmin = user?.role === 'admin'
+  const authenticatedHome = isAdmin ? '/admin' : '/dashboard'
 
   return (
     <div className="app-root">
@@ -14,23 +16,35 @@ export default function App() {
         <Routes>
           <Route
             path="/"
-            element={<Navigate to={isAuthenticated ? '/dashboard' : '/login'} replace />}
+            element={<Navigate to={isAuthenticated ? authenticatedHome : '/login'} replace />}
           />
           <Route
             path="/login"
-            element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <Login />}
+            element={isAuthenticated ? <Navigate to={authenticatedHome} replace /> : <Login />}
           />
           <Route
             path="/register"
-            element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <Register />}
+            element={isAuthenticated ? <Navigate to={authenticatedHome} replace /> : <Register />}
+          />
+          <Route
+            path="/admin"
+            element={
+              <ProtectedRoute requireAdmin>
+                <AdminDashboard onLogout={logout} user={user} />
+              </ProtectedRoute>
+            }
           />
           <Route
             path="/dashboard"
             element={
               <ProtectedRoute>
-                <AppShell user={user} onLogout={logout}>
-                  <Dashboard />
-                </AppShell>
+                {isAdmin ? (
+                  <Navigate to="/admin" replace />
+                ) : (
+                  <AppShell user={user} onLogout={logout}>
+                    <Dashboard />
+                  </AppShell>
+                )}
               </ProtectedRoute>
             }
           />
@@ -38,9 +52,13 @@ export default function App() {
             path="/groups"
             element={
               <ProtectedRoute>
-                <AppShell user={user} onLogout={logout}>
-                  <Groups />
-                </AppShell>
+                {isAdmin ? (
+                  <Navigate to="/admin" replace />
+                ) : (
+                  <AppShell user={user} onLogout={logout}>
+                    <Groups />
+                  </AppShell>
+                )}
               </ProtectedRoute>
             }
           />
@@ -48,9 +66,13 @@ export default function App() {
             path="/expenses"
             element={
               <ProtectedRoute>
-                <AppShell user={user} onLogout={logout}>
-                  <Expenses />
-                </AppShell>
+                {isAdmin ? (
+                  <Navigate to="/admin" replace />
+                ) : (
+                  <AppShell user={user} onLogout={logout}>
+                    <Expenses />
+                  </AppShell>
+                )}
               </ProtectedRoute>
             }
           />
@@ -58,9 +80,13 @@ export default function App() {
             path="/settlements"
             element={
               <ProtectedRoute>
-                <AppShell user={user} onLogout={logout}>
-                  <Settlements />
-                </AppShell>
+                {isAdmin ? (
+                  <Navigate to="/admin" replace />
+                ) : (
+                  <AppShell user={user} onLogout={logout}>
+                    <Settlements />
+                  </AppShell>
+                )}
               </ProtectedRoute>
             }
           />
@@ -68,12 +94,17 @@ export default function App() {
             path="/profile"
             element={
               <ProtectedRoute>
-                <AppShell user={user} onLogout={logout}>
-                  <Profile />
-                </AppShell>
+                {isAdmin ? (
+                  <Navigate to="/admin" replace />
+                ) : (
+                  <AppShell user={user} onLogout={logout}>
+                    <Profile />
+                  </AppShell>
+                )}
               </ProtectedRoute>
             }
           />
+          <Route path="*" element={<Navigate to={isAuthenticated ? authenticatedHome : '/login'} replace />} />
         </Routes>
       </main>
     </div>

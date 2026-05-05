@@ -1,15 +1,23 @@
-import React from 'react'
+import React, { useMemo } from 'react'
 import { NavLink } from 'react-router-dom'
 
-const items = [
-  { to: '/dashboard', label: 'Dashboard', icon: '📊' },
-  { to: '/groups', label: 'Groups', icon: '👥' },
-  { to: '/expenses', label: 'Expenses', icon: '💰' },
-  { to: '/settlements', label: 'Settlements', icon: '🤝' },
-  { to: '/profile', label: 'Profile', icon: '👤' },
-]
+export default function Sidebar({ user, open, onClose }) {
+  const items = useMemo(() => {
+    const baseItems = [
+      { to: '/dashboard', label: 'Dashboard', icon: '📊' },
+      { to: '/groups', label: 'Groups', icon: '👥' },
+      { to: '/expenses', label: 'Expenses', icon: '💰' },
+      { to: '/settlements', label: 'Settlements', icon: '🤝' },
+      { to: '/profile', label: 'Profile', icon: '👤' },
+    ]
 
-export default function Sidebar({ open, onClose }) {
+    if (user?.role === 'admin') {
+      return [{ to: '/admin', label: 'Admin', icon: '🛡️' }, ...baseItems]
+    }
+
+    return baseItems
+  }, [user?.role])
+
   return (
     <>
       {/* Backdrop overlay for mobile */}
@@ -19,13 +27,13 @@ export default function Sidebar({ open, onClose }) {
       />
 
       <aside
-        className={`fixed inset-y-0 left-0 z-50 flex w-[280px] flex-col border-r border-slate-200/60 bg-white/90 backdrop-blur-xl transition-transform duration-300 md:static md:z-auto md:translate-x-0 ${open ? 'translate-x-0' : '-translate-x-full'}`}
+        className={`fixed inset-y-0 left-0 z-50 flex w-70 flex-col border-r border-slate-200/60 bg-white/90 backdrop-blur-xl transition-transform duration-300 md:static md:z-auto md:translate-x-0 ${open ? 'translate-x-0' : '-translate-x-full'}`}
         style={{ height: '100vh', position: 'sticky', top: 0 }}
       >
         {/* Brand header */}
         <div className="flex items-center justify-between gap-3 border-b border-slate-200/60 px-5 py-5">
           <div className="flex items-center gap-3">
-            <span className="grid h-10 w-10 place-items-center rounded-2xl bg-gradient-to-br from-teal-600 to-emerald-400 text-sm font-bold text-white shadow-lg shadow-teal-500/25">
+            <span className="grid h-10 w-10 place-items-center rounded-2xl bg-linear-to-br from-teal-600 to-emerald-400 text-sm font-bold text-white shadow-lg shadow-teal-500/25">
               S
             </span>
             <div>
@@ -55,7 +63,7 @@ export default function Sidebar({ open, onClose }) {
                 className={({ isActive }) =>
                   `flex items-center gap-3 rounded-xl px-4 py-2.5 text-sm font-semibold transition-all duration-200 ${
                     isActive
-                      ? 'bg-gradient-to-r from-teal-50 to-emerald-50 text-teal-800 shadow-sm shadow-teal-100'
+                      ? 'bg-linear-to-r from-teal-50 to-emerald-50 text-teal-800 shadow-sm shadow-teal-100'
                       : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
                   }`
                 }

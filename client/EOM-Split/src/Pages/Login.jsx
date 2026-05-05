@@ -17,8 +17,9 @@ export default function Login() {
     setError('')
 
     try {
-      await login({ email, password })
-      navigate('/dashboard', { replace: true })
+      const payload = await login({ email, password })
+      const target = payload?.user?.role === 'admin' ? '/admin' : '/dashboard'
+      navigate(target, { replace: true })
     } catch (loginError) {
       setError(loginError?.response?.data?.message || loginError.message || 'Unable to log in.')
     } finally {

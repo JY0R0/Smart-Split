@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useState, useCallback } from 'react'
 import apiClient from '../services/apiClient'
 import ExpenseCard from '../components/ExpenseCard'
 import Modal from '../components/Modal'
+import AddExpenseForm from '../components/AddExpenseForm'
 
 function classifyCategory(title) {
   const value = (title || '').toLowerCase()
@@ -17,36 +18,41 @@ export default function Expenses() {
   const [loading, setLoading] = useState(true)
   const [open, setOpen] = useState(false)
 
-  useEffect(() => {
-    async function loadExpenses() {
-      try {
-        setLoading(true)
-        const { data: groupsPayload } = await apiClient.get('/groups')
-        const groups = groupsPayload.groups || []
+  const loadExpenses = useCallback(async () => {
+    try {
+      setLoading(true)
+      const { data: groupsPayload } = await apiClient.get('/groups')
+      const groups = groupsPayload.groups || []
 
-        const requests = groups.map(async (group) => {
-          try {
-            const { data } = await apiClient.get(`/groups/${group.id}/expenses`)
-            return (data.expenses || []).map((exp) => ({
-              ...exp,
-              groupName: group.name,
-            }))
-          } catch {
-            return []
-          }
-        })
+      const requests = groups.map(async (group) => {
+        try {
+          const { data } = await apiClient.get(`/groups/${group.id}/expenses`)
+          return (data.expenses || []).map((exp) => ({
+            ...exp,
+            groupName: group.name,
+          }))
+        } catch {
+          return []
+        }
+      })
 
-        const all = await Promise.all(requests)
-        setExpenses(all.flat())
-      } catch {
-        setExpenses([])
-      } finally {
-        setLoading(false)
-      }
+      const all = await Promise.all(requests)
+      setExpenses(all.flat())
+    } catch {
+      setExpenses([])
+    } finally {
+      setLoading(false)
     }
-
-    loadExpenses()
   }, [])
+
+  useEffect(() => {
+    loadExpenses()
+  }, [loadExpenses])
+
+  function handleExpenseAdded() {
+    setOpen(false)
+    loadExpenses()
+  }
 
   return (
     <section className="mx-auto flex max-w-7xl flex-col gap-6">
@@ -93,33 +99,8 @@ export default function Expenses() {
         title="Add Expense"
         open={open}
         onClose={() => setOpen(false)}
-        footer={
-          <button type="button" className="btn btn-primary" onClick={() => setOpen(false)}>
-            Save Expense
-          </button>
-        }
       >
-        <form className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <label className="grid gap-1.5">
-            <span className="text-sm font-semibold text-slate-700">Title</span>
-            <input className="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm outline-none transition-all placeholder:text-slate-400 focus:border-teal-400 focus:bg-white focus:ring-4 focus:ring-teal-100" type="text" placeholder="Dinner" />
-          </label>
-          <label className="grid gap-1.5">
-            <span className="text-sm font-semibold text-slate-700">Amount</span>
-            <input className="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm outline-none transition-all placeholder:text-slate-400 focus:border-teal-400 focus:bg-white focus:ring-4 focus:ring-teal-100" type="number" placeholder="1200" />
-          </label>
-          <label className="grid gap-1.5">
-            <span className="text-sm font-semibold text-slate-700">Paid by</span>
-            <input className="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm outline-none transition-all placeholder:text-slate-400 focus:border-teal-400 focus:bg-white focus:ring-4 focus:ring-teal-100" type="text" placeholder="Your name" />
-          </label>
-          <label className="grid gap-1.5">
-            <span className="text-sm font-semibold text-slate-700">Split type</span>
-            <select className="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm outline-none transition-all focus:border-teal-400 focus:bg-white focus:ring-4 focus:ring-teal-100" defaultValue="equal">
-              <option value="equal">Equal</option>
-              <option value="custom">Custom</option>
-            </select>
-          </label>
-        </form>
+        <AddExpenseForm onSuccess={handleExpenseAdded} />
       </Modal>
     </section>
   )

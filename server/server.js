@@ -9,7 +9,45 @@ require("dotenv").config({ path: path.join(__dirname, ".env") });
 const app = express();
 const db = new Database(path.join(__dirname, "dev.db"));
 db.pragma("foreign_keys = ON");
+
+// Ensure settlements table has groupId column (safe migration)
+try {
+  db.prepare("SELECT groupId FROM settlements LIMIT 0").run();
+} catch {
+  db.prepare("ALTER TABLE settlements ADD COLUMN groupId INTEGER REFERENCES groups(id) ON DELETE CASCADE").run();
+}
+
+// Ensure users table has role column (safe migration)
+try {
+  db.prepare("SELECT role FROM users LIMIT 0").run();
+} catch {
+  db.prepare("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'").run();
+}
+
 const jwtSecret = process.env.JWT_SECRET;
+const adminEmail = (process.env.ADMIN_EMAIL || "admin@smartsplit.local").trim().toLowerCase();
+const adminPassword = process.env.ADMIN_PASSWORD || "Admin@123";
+const adminName = (process.env.ADMIN_NAME || "Smart Split Admin").trim();
+
+async function ensureAdminAccount() {
+  const existingAdmin = db
+    .prepare("SELECT id, email, role FROM users WHERE email = ?")
+    .get(adminEmail);
+
+  if (!existingAdmin) {
+    const hashedPassword = await bcrypt.hash(adminPassword, 10);
+    db.prepare(
+      "INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, 'admin')"
+    ).run(adminName, adminEmail, hashedPassword);
+    console.log(`Admin account created for ${adminEmail}`);
+    return;
+  }
+
+  if (existingAdmin.role !== "admin") {
+    db.prepare("UPDATE users SET role = 'admin' WHERE id = ?").run(existingAdmin.id);
+    console.log(`Existing user promoted to admin: ${adminEmail}`);
+  }
+}
 
 function authenticateToken(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -26,11 +64,32 @@ function authenticateToken(req, res, next) {
   }
 
   try {
-    req.user = jwt.verify(token, jwtSecret);
+    const payload = jwt.verify(token, jwtSecret);
+    const user = db
+      .prepare("SELECT id, email, role FROM users WHERE id = ?")
+      .get(payload.id);
+
+    if (!user) {
+      return res.status(401).json({ message: "User does not exist." });
+    }
+
+    req.user = {
+      id: user.id,
+      email: user.email,
+      role: user.role || "user",
+    };
     return next();
   } catch (error) {
     return res.status(403).json({ message: "Invalid or expired token." });
   }
+}
+
+function requireAdmin(req, res, next) {
+  if (req.user?.role !== "admin") {
+    return res.status(403).json({ message: "Admin access is required." });
+  }
+
+  return next();
 }
 
 function isGroupMember(groupId, userId) {
@@ -233,17 +292,17 @@ app.post("/api/auth/register", async (req, res) => {
     const displayName = (name && name.trim()) || normalizedEmail.split("@")[0];
 
     const insertUser = db.prepare(
-      "INSERT INTO users (name, email, password) VALUES (?, ?, ?)"
+      "INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, 'user')"
     );
     const selectUser = db.prepare(
-      "SELECT id, name, email FROM users WHERE id = ?"
+      "SELECT id, name, email, role FROM users WHERE id = ?"
     );
 
     const result = insertUser.run(displayName, normalizedEmail, hashedPassword);
     const user = selectUser.get(result.lastInsertRowid);
 
     const token = jwt.sign(
-      { id: user.id, email: user.email },
+      { id: user.id, email: user.email, role: user.role || "user" },
       jwtSecret,
       { expiresIn: "7d" }
     );
@@ -272,7 +331,7 @@ app.post("/api/auth/login", async (req, res) => {
 
     const normalizedEmail = email.trim().toLowerCase();
     const user = db
-      .prepare("SELECT id, name, email, password FROM users WHERE email = ?")
+      .prepare("SELECT id, name, email, password, role FROM users WHERE email = ?")
       .get(normalizedEmail);
 
     if (!user) {
@@ -286,7 +345,7 @@ app.post("/api/auth/login", async (req, res) => {
     }
 
     const token = jwt.sign(
-      { id: user.id, email: user.email },
+      { id: user.id, email: user.email, role: user.role || "user" },
       jwtSecret,
       { expiresIn: "7d" }
     );
@@ -296,6 +355,7 @@ app.post("/api/auth/login", async (req, res) => {
         id: user.id,
         name: user.name,
         email: user.email,
+        role: user.role || "user",
       },
       token,
     });
@@ -310,6 +370,54 @@ app.get("/api/protected", authenticateToken, (req, res) => {
     message: "Protected route accessed successfully.",
     user: req.user,
   });
+});
+
+app.get("/api/admin/overview", authenticateToken, requireAdmin, (req, res) => {
+  try {
+    const users = db
+      .prepare("SELECT id, name, email, role FROM users ORDER BY id DESC")
+      .all();
+
+    const groups = db
+      .prepare(
+        "SELECT g.id, g.name, g.createdById, u.name AS createdByName, (SELECT COUNT(*) FROM group_members gm WHERE gm.groupId = g.id) AS memberCount FROM groups g JOIN users u ON u.id = g.createdById ORDER BY g.id DESC"
+      )
+      .all();
+
+    const expenses = db
+      .prepare(
+        "SELECT e.id, e.title, e.amount, e.groupId, g.name AS groupName, e.paidById, u.name AS paidByName FROM expenses e JOIN groups g ON g.id = e.groupId JOIN users u ON u.id = e.paidById ORDER BY e.id DESC"
+      )
+      .all();
+
+    const settlements = db
+      .prepare(
+        "SELECT s.id, s.amount, s.groupId, g.name AS groupName, s.payerId, p.name AS payerName, s.receiverId, r.name AS receiverName FROM settlements s LEFT JOIN groups g ON g.id = s.groupId JOIN users p ON p.id = s.payerId JOIN users r ON r.id = s.receiverId ORDER BY s.id DESC"
+      )
+      .all();
+
+    const summary = {
+      userCount: users.length,
+      adminCount: users.filter((user) => user.role === "admin").length,
+      groupCount: groups.length,
+      expenseCount: expenses.length,
+      settlementCount: settlements.length,
+      totalExpenseAmount: Number(
+        expenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0).toFixed(2)
+      ),
+    };
+
+    return res.status(200).json({
+      summary,
+      users,
+      groups,
+      expenses,
+      settlements,
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Failed to load admin overview." });
+  }
 });
 
 app.post("/api/groups", authenticateToken, (req, res) => {
@@ -456,12 +564,13 @@ app.get("/api/groups", authenticateToken, (req, res) => {
   try {
     const groups = db
       .prepare(
-        "SELECT g.id, g.name, g.createdById, u.name AS createdByName, u.email AS createdByEmail FROM groups g JOIN group_members gm ON gm.groupId = g.id JOIN users u ON u.id = g.createdById WHERE gm.userId = ? GROUP BY g.id ORDER BY g.id DESC"
+        "SELECT g.id, g.name, g.createdById, u.name AS createdByName, u.email AS createdByEmail, (SELECT COUNT(*) FROM group_members gm2 WHERE gm2.groupId = g.id) AS memberCount FROM groups g JOIN group_members gm ON gm.groupId = g.id JOIN users u ON u.id = g.createdById WHERE gm.userId = ? GROUP BY g.id ORDER BY g.id DESC"
       )
       .all(req.user.id)
       .map((group) => ({
         id: group.id,
         name: group.name,
+        memberCount: group.memberCount,
         createdBy: {
           id: group.createdById,
           name: group.createdByName,
@@ -769,7 +878,246 @@ app.delete("/api/expenses/:expenseId", authenticateToken, (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on port ${PORT}`);
+// ─── User-specific settlements with per-expense breakdowns ───
+
+function calculateUserSettlementsForGroup(groupId, userId) {
+  const group = db
+    .prepare("SELECT id, name FROM groups WHERE id = ?")
+    .get(groupId);
+
+  if (!group) return [];
+
+  const members = db
+    .prepare("SELECT u.id, u.name, u.email FROM group_members gm JOIN users u ON u.id = gm.userId WHERE gm.groupId = ?")
+    .all(groupId);
+
+  const otherMembers = members.filter((m) => m.id !== userId);
+  if (otherMembers.length === 0) return [];
+
+  const expenses = db
+    .prepare(
+      "SELECT e.id, e.title, e.amount, e.paidById, u.name AS paidByName FROM expenses e JOIN users u ON u.id = e.paidById WHERE e.groupId = ? ORDER BY e.id DESC"
+    )
+    .all(groupId);
+
+  const allSplits = db
+    .prepare(
+      "SELECT es.expenseId, es.userId, es.amount FROM expense_splits es WHERE es.expenseId IN (SELECT id FROM expenses WHERE groupId = ?)"
+    )
+    .all(groupId);
+
+  // Index splits by expenseId
+  const splitsByExpense = new Map();
+  for (const split of allSplits) {
+    if (!splitsByExpense.has(split.expenseId)) {
+      splitsByExpense.set(split.expenseId, []);
+    }
+    splitsByExpense.get(split.expenseId).push(split);
+  }
+
+  // Get existing settlements between user and others in this group
+  const existingSettlements = db
+    .prepare(
+      "SELECT id, payerId, receiverId, amount FROM settlements WHERE groupId = ? AND (payerId = ? OR receiverId = ?)"
+    )
+    .all(groupId, userId, userId);
+
+  const results = [];
+
+  for (const other of otherMembers) {
+    const expenseBreakdown = [];
+    let rawTotal = 0;
+
+    for (const expense of expenses) {
+      const splits = splitsByExpense.get(expense.id) || [];
+      const userSplit = splits.find((s) => s.userId === userId);
+      const otherSplit = splits.find((s) => s.userId === other.id);
+
+      let netEffect = 0;
+
+      // If current user paid and other has a split → other owes user
+      if (expense.paidById === userId && otherSplit) {
+        netEffect += Number(otherSplit.amount);
+      }
+
+      // If other paid and current user has a split → user owes other
+      if (expense.paidById === other.id && userSplit) {
+        netEffect -= Number(userSplit.amount);
+      }
+
+      if (netEffect !== 0) {
+        expenseBreakdown.push({
+          id: expense.id,
+          title: expense.title,
+          totalAmount: Number(expense.amount),
+          paidByName: expense.paidByName,
+          paidByUserId: expense.paidById,
+          yourShare: userSplit ? Number(userSplit.amount) : 0,
+          theirShare: otherSplit ? Number(otherSplit.amount) : 0,
+          netEffect: Number(netEffect.toFixed(2)),
+        });
+        rawTotal += netEffect;
+      }
+    }
+
+    // Factor in existing settlements
+    let settledAmount = 0;
+    const relatedSettlementIds = [];
+    for (const s of existingSettlements) {
+      if (
+        (s.payerId === userId && s.receiverId === other.id) ||
+        (s.payerId === other.id && s.receiverId === userId)
+      ) {
+        relatedSettlementIds.push(s.id);
+        // payer gave money to receiver, reducing payer's debt
+        if (s.payerId === userId) {
+          settledAmount += Number(s.amount); // user paid other, reduces what user owes
+        } else {
+          settledAmount -= Number(s.amount); // other paid user, reduces what other owes
+        }
+      }
+    }
+
+    const netTotal = Number((rawTotal + settledAmount).toFixed(2));
+
+    if (Math.abs(netTotal) < 0.01) continue; // balanced, skip
+
+    results.push({
+      groupId: group.id,
+      groupName: group.name,
+      otherUserId: other.id,
+      otherUserName: other.name,
+      otherUserEmail: other.email,
+      direction: netTotal > 0 ? "they_owe" : "you_owe",
+      totalAmount: Math.abs(netTotal),
+      settledAmount: Math.abs(settledAmount),
+      settlementIds: relatedSettlementIds,
+      expenses: expenseBreakdown,
+    });
+  }
+
+  return results;
+}
+
+app.get("/api/user/settlements", authenticateToken, (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const groups = db
+      .prepare(
+        "SELECT g.id FROM groups g JOIN group_members gm ON gm.groupId = g.id WHERE gm.userId = ?"
+      )
+      .all(userId);
+
+    const allSettlements = [];
+    for (const group of groups) {
+      const groupSettlements = calculateUserSettlementsForGroup(group.id, userId);
+      allSettlements.push(...groupSettlements);
+    }
+
+    return res.status(200).json({ settlements: allSettlements });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Failed to load settlements." });
+  }
 });
+
+app.post("/api/groups/:groupId/settle", authenticateToken, (req, res) => {
+  try {
+    const groupId = Number(req.params.groupId);
+    const { withUserId } = req.body;
+    const userId = req.user.id;
+
+    if (!Number.isInteger(groupId)) {
+      return res.status(400).json({ message: "Invalid group id." });
+    }
+
+    if (!withUserId || !Number.isInteger(Number(withUserId))) {
+      return res.status(400).json({ message: "withUserId is required." });
+    }
+
+    const group = isGroupAccessible(groupId, userId);
+    if (!group) {
+      return res.status(404).json({ message: "Group not found." });
+    }
+    if (group === false) {
+      return res.status(403).json({ message: "You are not a member of this group." });
+    }
+
+    if (!isGroupMember(groupId, Number(withUserId))) {
+      return res.status(400).json({ message: "Target user is not a member of this group." });
+    }
+
+    // Calculate current balance between these two users
+    const settlements = calculateUserSettlementsForGroup(groupId, userId);
+    const match = settlements.find((s) => s.otherUserId === Number(withUserId));
+
+    if (!match || match.totalAmount < 0.01) {
+      return res.status(400).json({ message: "No outstanding balance with this user." });
+    }
+
+    // Determine payer and receiver
+    const payerId = match.direction === "you_owe" ? userId : Number(withUserId);
+    const receiverId = match.direction === "you_owe" ? Number(withUserId) : userId;
+
+    db.prepare(
+      "INSERT INTO settlements (payerId, receiverId, amount, groupId) VALUES (?, ?, ?, ?)"
+    ).run(payerId, receiverId, match.totalAmount, groupId);
+
+    return res.status(201).json({
+      message: "Settlement recorded successfully.",
+      settlement: {
+        payerId,
+        receiverId,
+        amount: match.totalAmount,
+        groupId,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Failed to record settlement." });
+  }
+});
+
+app.delete("/api/settlements/:id", authenticateToken, (req, res) => {
+  try {
+    const settlementId = Number(req.params.id);
+    const userId = req.user.id;
+
+    if (!Number.isInteger(settlementId)) {
+      return res.status(400).json({ message: "Invalid settlement id." });
+    }
+
+    const settlement = db
+      .prepare("SELECT id, payerId, receiverId, groupId FROM settlements WHERE id = ?")
+      .get(settlementId);
+
+    if (!settlement) {
+      return res.status(404).json({ message: "Settlement not found." });
+    }
+
+    if (settlement.payerId !== userId && settlement.receiverId !== userId) {
+      return res.status(403).json({ message: "You are not involved in this settlement." });
+    }
+
+    db.prepare("DELETE FROM settlements WHERE id = ?").run(settlementId);
+
+    return res.status(200).json({ message: "Settlement deleted successfully." });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Failed to delete settlement." });
+  }
+});
+
+const PORT = process.env.PORT || 5000;
+ensureAdminAccount()
+  .then(() => {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on port ${PORT}`);
+      console.log(`Admin login email: ${adminEmail}`);
+    });
+  })
+  .catch((error) => {
+    console.error("Failed to initialize admin account.", error);
+    process.exit(1);
+  });

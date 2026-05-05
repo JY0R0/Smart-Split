@@ -18,8 +18,9 @@ export default function Register() {
     setError('')
 
     try {
-      await register({ name, email, password })
-      navigate('/dashboard', { replace: true })
+      const payload = await register({ name, email, password })
+      const target = payload?.user?.role === 'admin' ? '/admin' : '/dashboard'
+      navigate(target, { replace: true })
     } catch (registerError) {
       setError(registerError?.response?.data?.message || registerError.message || 'Unable to register.')
     } finally {

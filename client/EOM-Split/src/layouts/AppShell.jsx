@@ -7,7 +7,7 @@ export default function AppShell({ user, onLogout, children }) {
 
   return (
     <div className="flex min-h-screen bg-[var(--bg)]">
-      <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+      <Sidebar user={user} open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
 
       <div className="flex min-w-0 flex-1 flex-col">
         <Navbar user={user} onLogout={onLogout} onMenuClick={() => setSidebarOpen(true)} />
