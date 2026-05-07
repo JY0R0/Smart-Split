@@ -51,6 +51,8 @@ model Expense {
   amount    Decimal
   paidById  Int
   groupId   Int
+  photoUrl  String?
+  settled   Boolean        @default(false)
   paidBy    User           @relation("ExpensePayer", fields: [paidById], references: [id], onDelete: Restrict)
   group     Group          @relation(fields: [groupId], references: [id], onDelete: Cascade)
   splits    ExpenseSplit[]

@@ -17,6 +17,8 @@ export default function Expenses() {
   const [expenses, setExpenses] = useState([])
   const [loading, setLoading] = useState(true)
   const [open, setOpen] = useState(false)
+  const [editingExpense, setEditingExpense] = useState(null)
+  const [editOpen, setEditOpen] = useState(false)
 
   const loadExpenses = useCallback(async () => {
     try {
@@ -54,6 +56,20 @@ export default function Expenses() {
     loadExpenses()
   }
 
+  function handleEditExpense(expenseId) {
+    const expense = expenses.find((e) => e.id === expenseId)
+    if (expense) {
+      setEditingExpense(expense)
+      setEditOpen(true)
+    }
+  }
+
+  function handleExpenseUpdated() {
+    setEditOpen(false)
+    setEditingExpense(null)
+    loadExpenses()
+  }
+
   return (
     <section className="mx-auto flex max-w-7xl flex-col gap-6">
       {/* Header */}
@@ -84,11 +100,14 @@ export default function Expenses() {
           {expenses.map((expense) => (
             <ExpenseCard
               key={expense.id}
+              id={expense.id}
               title={expense.title}
               amount={expense.amount}
               groupName={expense.groupName || `Group ${expense.groupId}`}
               paidByName={expense.paidByName || 'Unknown'}
               category={classifyCategory(expense.title)}
+              photoUrl={expense.photoUrl}
+              onEdit={handleEditExpense}
             />
           ))}
         </div>
@@ -101,6 +120,24 @@ export default function Expenses() {
         onClose={() => setOpen(false)}
       >
         <AddExpenseForm onSuccess={handleExpenseAdded} />
+      </Modal>
+
+      {/* Edit Expense Modal */}
+      <Modal
+        title="Edit Expense"
+        open={editOpen}
+        onClose={() => {
+          setEditOpen(false)
+          setEditingExpense(null)
+        }}
+      >
+        {editingExpense && (
+          <AddExpenseForm 
+            expenseId={editingExpense.id}
+            initialExpense={editingExpense}
+            onSuccess={handleExpenseUpdated} 
+          />
+        )}
       </Modal>
     </section>
   )

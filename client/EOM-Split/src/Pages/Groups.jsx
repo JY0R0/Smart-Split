@@ -20,6 +20,10 @@ export default function Groups() {
   const [groupDetail, setGroupDetail] = useState(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailOpen, setDetailOpen] = useState(false)
+  const [groupNameDraft, setGroupNameDraft] = useState('')
+  const [groupMessage, setGroupMessage] = useState('')
+  const [groupActionError, setGroupActionError] = useState('')
+  const [memberActionKey, setMemberActionKey] = useState('')
 
   // Add member
   const [memberEmail, setMemberEmail] = useState('')
@@ -68,11 +72,15 @@ export default function Groups() {
     setMemberEmail('')
     setMemberError('')
     setMemberSuccess('')
+    setGroupMessage('')
+    setGroupActionError('')
+    setGroupNameDraft(group.name || '')
     setDetailLoading(true)
 
     try {
       const { data } = await apiClient.get(`/groups/${group.id}`)
       setGroupDetail(data.group)
+      setGroupNameDraft(data.group?.name || group.name || '')
     } catch {
       setGroupDetail(null)
     } finally {
@@ -87,11 +95,86 @@ export default function Groups() {
     setMemberEmail('')
     setMemberError('')
     setMemberSuccess('')
+    setGroupNameDraft('')
+    setGroupMessage('')
+    setGroupActionError('')
+  }
+
+  async function refreshSelectedGroup(groupId = selectedGroup?.id) {
+    if (!groupId) return
+
+    const { data } = await apiClient.get(`/groups/${groupId}`)
+    setGroupDetail(data.group)
+    setGroupNameDraft(data.group?.name || '')
+
+    const { data: refreshedGroups } = await apiClient.get('/groups')
+    setGroups(refreshedGroups.groups || [])
+  }
+
+  async function handleRenameGroup(e) {
+    e.preventDefault()
+    if (!selectedGroup || !groupNameDraft.trim()) return
+
+    setSavingGroup(true)
+    setGroupActionError('')
+    setGroupMessage('')
+
+    try {
+      await apiClient.patch(`/groups/${selectedGroup.id}`, { name: groupNameDraft.trim() })
+      await refreshSelectedGroup(selectedGroup.id)
+      setGroupMessage('Group name updated successfully.')
+    } catch (err) {
+      setGroupActionError(err?.response?.data?.message || 'Failed to update group.')
+    } finally {
+      setSavingGroup(false)
+    }
+  }
+
+  async function handleToggleGroupStatus() {
+    if (!selectedGroup || !groupDetail) return
+
+    setSavingGroup(true)
+    setGroupActionError('')
+    setGroupMessage('')
+
+    try {
+      const nextStatus = groupDetail.status === 'defunct' ? 'active' : 'defunct'
+      await apiClient.patch(`/groups/${selectedGroup.id}`, { status: nextStatus })
+      await refreshSelectedGroup(selectedGroup.id)
+      setGroupMessage(nextStatus === 'defunct' ? 'Group marked defunct.' : 'Group reactivated.')
+    } catch (err) {
+      setGroupActionError(err?.response?.data?.message || 'Failed to update group status.')
+    } finally {
+      setSavingGroup(false)
+    }
+  }
+
+  async function handleRemoveMember(member) {
+    if (!selectedGroup || !member) return
+
+    setMemberActionKey(String(member.id))
+    setGroupActionError('')
+    setGroupMessage('')
+
+    try {
+      await apiClient.delete(`/groups/${selectedGroup.id}/members/${member.id}`)
+      await refreshSelectedGroup(selectedGroup.id)
+      setGroupMessage(`${member.name || member.email} removed from the group.`)
+    } catch (err) {
+      setGroupActionError(err?.response?.data?.message || 'Failed to remove member.')
+    } finally {
+      setMemberActionKey('')
+    }
   }
 
   async function handleAddMember(e) {
     e.preventDefault()
     if (!memberEmail.trim() || !selectedGroup) return
+
+    if (groupDetail?.status === 'defunct') {
+      setMemberError('Defunct groups cannot be modified.')
+      return
+    }
 
     setAddingMember(true)
     setMemberError('')
@@ -105,8 +188,7 @@ export default function Groups() {
       setMemberEmail('')
 
       // Refresh group detail to show new member
-      const { data: refreshed } = await apiClient.get(`/groups/${selectedGroup.id}`)
-      setGroupDetail(refreshed.group)
+      await refreshSelectedGroup(selectedGroup.id)
 
       // Also refresh groups list for member count
       loadGroups()
@@ -150,6 +232,7 @@ export default function Groups() {
               name={group.name}
               members={group.memberCount || 1}
               balance={`Created by ${group.createdBy?.name || 'You'}`}
+              status={group.status}
               accent={ACCENTS[index % ACCENTS.length]}
               onClick={() => openGroupDetail(group)}
             />
@@ -203,6 +286,44 @@ export default function Groups() {
           <p className="py-4 text-sm text-slate-500">Failed to load group details.</p>
         ) : (
           <div className="grid gap-5">
+            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <p className="text-sm font-semibold text-slate-700">Group settings</p>
+                <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${groupDetail.status === 'defunct' ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                  {groupDetail.status === 'defunct' ? 'Defunct' : 'Active'}
+                </span>
+              </div>
+              <form onSubmit={handleRenameGroup} className="grid gap-3">
+                <label className="grid gap-1.5">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Group name</span>
+                  <input
+                    className="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm outline-none transition-all placeholder:text-slate-400 focus:border-teal-400 focus:bg-white focus:ring-4 focus:ring-teal-100"
+                    value={groupNameDraft}
+                    onChange={(e) => setGroupNameDraft(e.target.value)}
+                  />
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  <button type="submit" className="btn btn-primary" disabled={savingGroup || !groupNameDraft.trim()}>
+                    {savingGroup ? 'Saving…' : 'Rename Group'}
+                  </button>
+                  <button type="button" className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={savingGroup} onClick={handleToggleGroupStatus}>
+                    {groupDetail.status === 'defunct' ? 'Reactivate Group' : 'Mark Defunct'}
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            {groupActionError && (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
+                {groupActionError}
+              </div>
+            )}
+            {groupMessage && (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700">
+                {groupMessage}
+              </div>
+            )}
+
             {/* Members list */}
             <div className="grid gap-2">
               <h4 className="text-sm font-semibold text-slate-700">
@@ -214,10 +335,19 @@ export default function Groups() {
                     <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-teal-50 text-xs font-bold text-teal-700">
                       {(member.name || 'U').charAt(0).toUpperCase()}
                     </span>
-                    <div className="min-w-0">
+                    <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-medium text-slate-900">{member.name}</p>
                       <p className="truncate text-xs text-slate-400">{member.email}</p>
                     </div>
+                    <button
+                      type="button"
+                      className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={() => handleRemoveMember(member)}
+                      disabled={savingGroup || memberActionKey === String(member.id) || groupDetail.status === 'defunct' || member.id === groupDetail.createdBy.id}
+                      title={member.id === groupDetail.createdBy.id ? 'The group creator cannot be removed.' : 'Remove member'}
+                    >
+                      {memberActionKey === String(member.id) ? 'Removing…' : 'Remove'}
+                    </button>
                   </div>
                 ))}
               </div>
@@ -238,11 +368,14 @@ export default function Groups() {
                 <button
                   type="submit"
                   className="btn btn-primary shrink-0"
-                  disabled={addingMember || !memberEmail.trim()}
+                  disabled={addingMember || !memberEmail.trim() || groupDetail.status === 'defunct'}
                 >
                   {addingMember ? 'Adding…' : 'Add'}
                 </button>
               </div>
+              {groupDetail.status === 'defunct' && (
+                <p className="text-xs text-slate-400">Defunct groups are read-only until reactivated.</p>
+              )}
               {memberError && (
                 <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
                   {memberError}

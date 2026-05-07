@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import apiClient from '../services/apiClient'
 
-export default function AddExpenseForm({ onSuccess, onError }) {
+export default function AddExpenseForm({ onSuccess, onError, expenseId, initialExpense }) {
   const [groups, setGroups] = useState([])
   const [members, setMembers] = useState([])
   const [title, setTitle] = useState('')
@@ -9,10 +9,15 @@ export default function AddExpenseForm({ onSuccess, onError }) {
   const [groupId, setGroupId] = useState('')
   const [paidById, setPaidById] = useState('')
   const [selectedParticipants, setSelectedParticipants] = useState([])
+  const [photoUrl, setPhotoUrl] = useState('')
+  const [photoPreview, setPhotoPreview] = useState('')
   const [loadingGroups, setLoadingGroups] = useState(true)
   const [loadingMembers, setLoadingMembers] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [photoInput, setPhotoInput] = useState(null)
+
+  const isEditMode = !!expenseId
 
   // Load user's groups on mount
   useEffect(() => {
@@ -30,12 +35,27 @@ export default function AddExpenseForm({ onSuccess, onError }) {
     fetchGroups()
   }, [])
 
+  // Initialize form with expense data if editing
+  useEffect(() => {
+    if (isEditMode && initialExpense) {
+      setTitle(initialExpense.title || '')
+      setAmount(String(initialExpense.amount || ''))
+      setGroupId(String(initialExpense.groupId || ''))
+      setPaidById(String(initialExpense.paidById || ''))
+      setPhotoUrl(initialExpense.photoUrl || '')
+      setPhotoPreview(initialExpense.photoUrl || '')
+      setSelectedParticipants(initialExpense.splits ? initialExpense.splits.map((s) => s.userId) : [])
+    }
+  }, [isEditMode, initialExpense])
+
   // Load members when group changes
   useEffect(() => {
     if (!groupId) {
       setMembers([])
-      setPaidById('')
-      setSelectedParticipants([])
+      if (!isEditMode) {
+        setPaidById('')
+        setSelectedParticipants([])
+      }
       return
     }
 
@@ -45,8 +65,8 @@ export default function AddExpenseForm({ onSuccess, onError }) {
         const { data } = await apiClient.get(`/groups/${groupId}`)
         const groupMembers = data.group?.members || []
         setMembers(groupMembers)
-        // Default: current user pays, all members split
-        if (groupMembers.length > 0) {
+        // Default: current user pays, all members split (only for new expenses)
+        if (!isEditMode && groupMembers.length > 0) {
           setPaidById(String(groupMembers[0].id))
           setSelectedParticipants(groupMembers.map((m) => m.id))
         }
@@ -57,7 +77,7 @@ export default function AddExpenseForm({ onSuccess, onError }) {
       }
     }
     fetchMembers()
-  }, [groupId])
+  }, [groupId, isEditMode])
 
   function toggleParticipant(memberId) {
     setSelectedParticipants((prev) =>
@@ -65,6 +85,29 @@ export default function AddExpenseForm({ onSuccess, onError }) {
         ? prev.filter((id) => id !== memberId)
         : [...prev, memberId]
     )
+  }
+
+  function openPhotoFilePicker() {
+    if (photoInput) photoInput.click()
+  }
+
+  function handlePhotoChange(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onload = (event) => {
+      const dataUri = event.target?.result
+      setPhotoUrl(dataUri || '')
+      setPhotoPreview(dataUri || '')
+    }
+    reader.readAsDataURL(file)
+  }
+
+  function clearPhoto() {
+    setPhotoUrl('')
+    setPhotoPreview('')
+    if (photoInput) photoInput.value = ''
   }
 
   async function handleSubmit(e) {
@@ -94,25 +137,36 @@ export default function AddExpenseForm({ onSuccess, onError }) {
 
     setSaving(true)
     try {
-      await apiClient.post(`/groups/${groupId}/expenses`, {
+      const payload = {
         title: title.trim(),
         amount: Number(amount),
         paidById: Number(paidById),
         splitType: 'equal',
         participants: selectedParticipants,
-      })
+        ...(photoUrl && { photoUrl }),
+      }
+
+      if (isEditMode) {
+        await apiClient.put(`/api/expenses/${expenseId}`, payload)
+      } else {
+        await apiClient.post(`/groups/${groupId}/expenses`, payload)
+      }
 
       // Reset form
-      setTitle('')
-      setAmount('')
-      setGroupId('')
-      setPaidById('')
-      setSelectedParticipants([])
-      setMembers([])
+      if (!isEditMode) {
+        setTitle('')
+        setAmount('')
+        setGroupId('')
+        setPaidById('')
+        setSelectedParticipants([])
+        setMembers([])
+        setPhotoUrl('')
+        setPhotoPreview('')
+      }
 
       if (onSuccess) onSuccess()
     } catch (err) {
-      const msg = err?.response?.data?.message || 'Failed to add expense.'
+      const msg = err?.response?.data?.message || `Failed to ${isEditMode ? 'update' : 'add'} expense.`
       setError(msg)
       if (onError) onError(msg)
     } finally {
@@ -153,32 +207,34 @@ export default function AddExpenseForm({ onSuccess, onError }) {
         />
       </label>
 
-      {/* Group selector */}
-      <label className="grid gap-1.5">
-        <span className="text-sm font-semibold text-slate-700">Group</span>
-        {loadingGroups ? (
-          <div className="flex items-center gap-2 px-4 py-3 text-sm text-slate-400">
-            <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-200 border-t-teal-500" />
-            Loading groups…
-          </div>
-        ) : groups.length === 0 ? (
-          <p className="px-4 py-3 text-sm text-slate-400">No groups found. Create a group first.</p>
-        ) : (
-          <select
-            className={inputClass}
-            value={groupId}
-            onChange={(e) => setGroupId(e.target.value)}
-            required
-          >
-            <option value="">Select a group…</option>
-            {groups.map((g) => (
-              <option key={g.id} value={g.id}>
-                {g.name}
-              </option>
-            ))}
-          </select>
-        )}
-      </label>
+      {/* Group selector - disabled in edit mode */}
+      {!isEditMode && (
+        <label className="grid gap-1.5">
+          <span className="text-sm font-semibold text-slate-700">Group</span>
+          {loadingGroups ? (
+            <div className="flex items-center gap-2 px-4 py-3 text-sm text-slate-400">
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-200 border-t-teal-500" />
+              Loading groups…
+            </div>
+          ) : groups.length === 0 ? (
+            <p className="px-4 py-3 text-sm text-slate-400">No groups found. Create a group first.</p>
+          ) : (
+            <select
+              className={inputClass}
+              value={groupId}
+              onChange={(e) => setGroupId(e.target.value)}
+              required
+            >
+              <option value="">Select a group…</option>
+              {groups.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.name}
+                </option>
+              ))}
+            </select>
+          )}
+        </label>
+      )}
 
       {/* Paid by */}
       <label className="grid gap-1.5">
@@ -247,6 +303,45 @@ export default function AddExpenseForm({ onSuccess, onError }) {
         </div>
       )}
 
+      {/* Photo upload section */}
+      <div className="col-span-full grid gap-2">
+        <span className="text-sm font-semibold text-slate-700">Receipt Photo (Optional)</span>
+        {photoPreview ? (
+          <div className="space-y-2">
+            <img
+              src={photoPreview.startsWith('/uploads') ? `http://127.0.0.1:5000${photoPreview}` : photoPreview}
+              alt="Receipt"
+              className="max-h-48 rounded-xl border border-slate-200 object-cover"
+            />
+            <button
+              type="button"
+              onClick={clearPhoto}
+              className="btn btn-secondary text-sm"
+            >
+              Remove Photo
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={openPhotoFilePicker}
+            className="flex h-32 items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 transition-colors hover:border-teal-400 hover:bg-teal-50"
+          >
+            <div className="text-center">
+              <span className="text-2xl">📸</span>
+              <p className="text-xs text-slate-500">Click to upload receipt photo</p>
+            </div>
+          </button>
+        )}
+        <input
+          ref={setPhotoInput}
+          type="file"
+          accept="image/*"
+          onChange={handlePhotoChange}
+          className="hidden"
+        />
+      </div>
+
       {/* Error */}
       {error && (
         <div className="col-span-full rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
@@ -264,7 +359,7 @@ export default function AddExpenseForm({ onSuccess, onError }) {
           className="btn btn-primary"
           disabled={saving || loadingGroups || loadingMembers}
         >
-          {saving ? 'Saving…' : 'Save Expense'}
+          {saving ? 'Saving…' : isEditMode ? 'Update Expense' : 'Save Expense'}
         </button>
       </div>
     </form>

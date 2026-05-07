@@ -4,6 +4,7 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const Database = require("better-sqlite3");
 const path = require("path");
+const fs = require("fs");
 require("dotenv").config({ path: path.join(__dirname, ".env") });
 
 const app = express();
@@ -17,11 +18,28 @@ try {
   db.prepare("ALTER TABLE settlements ADD COLUMN groupId INTEGER REFERENCES groups(id) ON DELETE CASCADE").run();
 }
 
+// Ensure payment_claims table exists (safe migration)
+try {
+  db.prepare("SELECT id FROM payment_claims LIMIT 0").run();
+} catch {
+  db.prepare("CREATE TABLE IF NOT EXISTS payment_claims ( id INTEGER PRIMARY KEY AUTOINCREMENT, payerId INTEGER NOT NULL, receiverId INTEGER NOT NULL, amount REAL NOT NULL, groupId INTEGER, proofUrl TEXT, status TEXT NOT NULL DEFAULT 'pending', claimedAt DATETIME DEFAULT CURRENT_TIMESTAMP, approvedAt DATETIME, approvedBy INTEGER, FOREIGN KEY (payerId) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (receiverId) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (groupId) REFERENCES groups(id) ON DELETE CASCADE )").run();
+}
+
+// Serve uploaded proof images (if any)
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
 // Ensure users table has role column (safe migration)
 try {
   db.prepare("SELECT role FROM users LIMIT 0").run();
 } catch {
   db.prepare("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'").run();
+}
+
+// Ensure groups table has status column (safe migration)
+try {
+  db.prepare("SELECT status FROM groups LIMIT 0").run();
+} catch {
+  db.prepare("ALTER TABLE groups ADD COLUMN status TEXT NOT NULL DEFAULT 'active'").run();
 }
 
 const jwtSecret = process.env.JWT_SECRET;
@@ -100,7 +118,7 @@ function isGroupMember(groupId, userId) {
 
 function isGroupAccessible(groupId, userId) {
   const group = db
-    .prepare("SELECT id, createdById FROM groups WHERE id = ?")
+    .prepare("SELECT id, createdById, status FROM groups WHERE id = ?")
     .get(groupId);
 
   if (!group) {
@@ -112,6 +130,10 @@ function isGroupAccessible(groupId, userId) {
   }
 
   return group;
+}
+
+function isGroupDefunct(group) {
+  return group && (group.status || "active") === "defunct";
 }
 
 function buildEqualSplits(amount, participantIds) {
@@ -186,11 +208,11 @@ function calculateGroupBalances(groupId) {
   );
 
   const expenses = db
-    .prepare("SELECT id, amount, paidById FROM expenses WHERE groupId = ?")
+    .prepare("SELECT id, amount, paidById FROM expenses WHERE groupId = ? AND settled = 0")
     .all(groupId);
 
   const splitRows = db
-    .prepare("SELECT expenseId, userId, amount FROM expense_splits WHERE expenseId IN (SELECT id FROM expenses WHERE groupId = ?)")
+    .prepare("SELECT expenseId, userId, amount FROM expense_splits WHERE expenseId IN (SELECT id FROM expenses WHERE groupId = ? AND settled = 0)")
     .all(groupId);
 
   for (const expense of expenses) {
@@ -265,7 +287,8 @@ function calculateGroupBalances(groupId) {
 }
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 app.post("/api/auth/register", async (req, res) => {
   try {
@@ -374,6 +397,7 @@ app.get("/api/protected", authenticateToken, (req, res) => {
 
 app.get("/api/admin/overview", authenticateToken, requireAdmin, (req, res) => {
   try {
+    const includeSettled = req.query.includeSettled === 'true'
     const users = db
       .prepare("SELECT id, name, email, role FROM users ORDER BY id DESC")
       .all();
@@ -384,11 +408,11 @@ app.get("/api/admin/overview", authenticateToken, requireAdmin, (req, res) => {
       )
       .all();
 
-    const expenses = db
-      .prepare(
-        "SELECT e.id, e.title, e.amount, e.groupId, g.name AS groupName, e.paidById, u.name AS paidByName FROM expenses e JOIN groups g ON g.id = e.groupId JOIN users u ON u.id = e.paidById ORDER BY e.id DESC"
-      )
-      .all();
+    const expensesQuery = includeSettled
+      ? "SELECT e.id, e.title, e.amount, e.groupId, g.name AS groupName, e.paidById, u.name AS paidByName FROM expenses e JOIN groups g ON g.id = e.groupId JOIN users u ON u.id = e.paidById ORDER BY e.id DESC"
+      : "SELECT e.id, e.title, e.amount, e.groupId, g.name AS groupName, e.paidById, u.name AS paidByName FROM expenses e JOIN groups g ON g.id = e.groupId JOIN users u ON u.id = e.paidById WHERE e.settled = 0 ORDER BY e.id DESC";
+
+    const expenses = db.prepare(expensesQuery).all();
 
     const settlements = db
       .prepare(
@@ -461,11 +485,15 @@ app.post("/api/groups/:groupId/members", authenticateToken, (req, res) => {
     }
 
     const group = db
-      .prepare("SELECT id, createdById FROM groups WHERE id = ?")
+      .prepare("SELECT id, createdById, status FROM groups WHERE id = ?")
       .get(groupId);
 
     if (!group) {
       return res.status(404).json({ message: "Group not found." });
+    }
+
+    if (isGroupDefunct(group)) {
+      return res.status(400).json({ message: "Defunct groups cannot be modified." });
     }
 
     if (group.createdById !== req.user.id && !isGroupMember(groupId, req.user.id)) {
@@ -507,6 +535,190 @@ app.post("/api/groups/:groupId/members", authenticateToken, (req, res) => {
   }
 });
 
+app.patch("/api/groups/:groupId", authenticateToken, (req, res) => {
+  try {
+    const groupId = Number(req.params.groupId);
+    const { name, status } = req.body;
+
+    if (!Number.isInteger(groupId)) {
+      return res.status(400).json({ message: "Invalid group id." });
+    }
+
+    const group = db
+      .prepare("SELECT id, createdById, status FROM groups WHERE id = ?")
+      .get(groupId);
+
+    if (!group) {
+      return res.status(404).json({ message: "Group not found." });
+    }
+
+    if (group.createdById !== req.user.id) {
+      return res.status(403).json({ message: "Only the group creator can edit this group." });
+    }
+
+    const nextName = typeof name === "string" ? name.trim() : null;
+    const nextStatus = typeof status === "string" ? status.trim().toLowerCase() : null;
+
+    if (!nextName && !nextStatus) {
+      return res.status(400).json({ message: "Nothing to update." });
+    }
+
+    if (nextName) {
+      db.prepare("UPDATE groups SET name = ? WHERE id = ?").run(nextName, groupId);
+    }
+
+    if (nextStatus) {
+      if (!["active", "defunct"].includes(nextStatus)) {
+        return res.status(400).json({ message: "Invalid group status." });
+      }
+      db.prepare("UPDATE groups SET status = ? WHERE id = ?").run(nextStatus, groupId);
+    }
+
+    const updatedGroup = db
+      .prepare("SELECT id, name, createdById, status FROM groups WHERE id = ?")
+      .get(groupId);
+
+    return res.status(200).json({ message: "Group updated successfully.", group: updatedGroup });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Failed to update group." });
+  }
+});
+
+app.delete("/api/groups/:groupId/members/:memberId", authenticateToken, (req, res) => {
+  try {
+    const groupId = Number(req.params.groupId);
+    const memberId = Number(req.params.memberId);
+
+    if (!Number.isInteger(groupId) || !Number.isInteger(memberId)) {
+      return res.status(400).json({ message: "Invalid id." });
+    }
+
+    const group = db
+      .prepare("SELECT id, createdById, status FROM groups WHERE id = ?")
+      .get(groupId);
+
+    if (!group) {
+      return res.status(404).json({ message: "Group not found." });
+    }
+
+    if (isGroupDefunct(group)) {
+      return res.status(400).json({ message: "Defunct groups cannot be modified." });
+    }
+
+    if (group.createdById !== req.user.id) {
+      return res.status(403).json({ message: "Only the group creator can remove members." });
+    }
+
+    if (group.createdById === memberId) {
+      return res.status(400).json({ message: "You cannot remove the group creator." });
+    }
+
+    if (!isGroupMember(groupId, memberId)) {
+      return res.status(404).json({ message: "Member not found in this group." });
+    }
+
+    db.prepare("DELETE FROM group_members WHERE groupId = ? AND userId = ?").run(groupId, memberId);
+
+    return res.status(200).json({ message: "Member removed successfully." });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Failed to remove member." });
+  }
+});
+
+app.patch("/api/groups/:groupId", authenticateToken, (req, res) => {
+  try {
+    const groupId = Number(req.params.groupId);
+    const { name, status } = req.body;
+
+    if (!Number.isInteger(groupId)) {
+      return res.status(400).json({ message: "Invalid group id." });
+    }
+
+    const group = db
+      .prepare("SELECT id, createdById, status FROM groups WHERE id = ?")
+      .get(groupId);
+
+    if (!group) {
+      return res.status(404).json({ message: "Group not found." });
+    }
+
+    if (group.createdById !== req.user.id) {
+      return res.status(403).json({ message: "Only the group creator can edit this group." });
+    }
+
+    const nextName = typeof name === "string" ? name.trim() : null;
+    const nextStatus = typeof status === "string" ? status.trim().toLowerCase() : null;
+
+    if (!nextName && !nextStatus) {
+      return res.status(400).json({ message: "Nothing to update." });
+    }
+
+    if (nextName) {
+      db.prepare("UPDATE groups SET name = ? WHERE id = ?").run(nextName, groupId);
+    }
+
+    if (nextStatus) {
+      if (!["active", "defunct"].includes(nextStatus)) {
+        return res.status(400).json({ message: "Invalid group status." });
+      }
+      db.prepare("UPDATE groups SET status = ? WHERE id = ?").run(nextStatus, groupId);
+    }
+
+    const updatedGroup = db
+      .prepare("SELECT id, name, createdById, status FROM groups WHERE id = ?")
+      .get(groupId);
+
+    return res.status(200).json({ message: "Group updated successfully.", group: updatedGroup });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Failed to update group." });
+  }
+});
+
+app.delete("/api/groups/:groupId/members/:memberId", authenticateToken, (req, res) => {
+  try {
+    const groupId = Number(req.params.groupId);
+    const memberId = Number(req.params.memberId);
+
+    if (!Number.isInteger(groupId) || !Number.isInteger(memberId)) {
+      return res.status(400).json({ message: "Invalid id." });
+    }
+
+    const group = db
+      .prepare("SELECT id, createdById, status FROM groups WHERE id = ?")
+      .get(groupId);
+
+    if (!group) {
+      return res.status(404).json({ message: "Group not found." });
+    }
+
+    if (isGroupDefunct(group)) {
+      return res.status(400).json({ message: "Defunct groups cannot be modified." });
+    }
+
+    if (group.createdById !== req.user.id) {
+      return res.status(403).json({ message: "Only the group creator can remove members." });
+    }
+
+    if (group.createdById === memberId) {
+      return res.status(400).json({ message: "You cannot remove the group creator." });
+    }
+
+    if (!isGroupMember(groupId, memberId)) {
+      return res.status(404).json({ message: "Member not found in this group." });
+    }
+
+    db.prepare("DELETE FROM group_members WHERE groupId = ? AND userId = ?").run(groupId, memberId);
+
+    return res.status(200).json({ message: "Member removed successfully." });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Failed to remove member." });
+  }
+});
+
 app.get("/api/groups/:groupId", authenticateToken, (req, res) => {
   try {
     const groupId = Number(req.params.groupId);
@@ -537,7 +749,7 @@ app.get("/api/groups/:groupId", authenticateToken, (req, res) => {
 
     const expenses = db
       .prepare(
-        "SELECT e.id, e.title, e.amount, e.paidById, u.name AS paidByName, e.groupId FROM expenses e JOIN users u ON u.id = e.paidById WHERE e.groupId = ? ORDER BY e.id DESC"
+        "SELECT e.id, e.title, e.amount, e.paidById, u.name AS paidByName, e.groupId FROM expenses e JOIN users u ON u.id = e.paidById WHERE e.groupId = ? AND e.settled = 0 ORDER BY e.id DESC"
       )
       .all(groupId);
 
@@ -545,6 +757,7 @@ app.get("/api/groups/:groupId", authenticateToken, (req, res) => {
       group: {
         id: group.id,
         name: group.name,
+        status: group.status || "active",
         createdBy: {
           id: group.createdById,
           name: group.createdByName,
@@ -564,12 +777,13 @@ app.get("/api/groups", authenticateToken, (req, res) => {
   try {
     const groups = db
       .prepare(
-        "SELECT g.id, g.name, g.createdById, u.name AS createdByName, u.email AS createdByEmail, (SELECT COUNT(*) FROM group_members gm2 WHERE gm2.groupId = g.id) AS memberCount FROM groups g JOIN group_members gm ON gm.groupId = g.id JOIN users u ON u.id = g.createdById WHERE gm.userId = ? GROUP BY g.id ORDER BY g.id DESC"
+        "SELECT g.id, g.name, g.status, g.createdById, u.name AS createdByName, u.email AS createdByEmail, (SELECT COUNT(*) FROM group_members gm2 WHERE gm2.groupId = g.id) AS memberCount FROM groups g JOIN group_members gm ON gm.groupId = g.id JOIN users u ON u.id = g.createdById WHERE gm.userId = ? GROUP BY g.id ORDER BY g.id DESC"
       )
       .all(req.user.id)
       .map((group) => ({
         id: group.id,
         name: group.name,
+        status: group.status || "active",
         memberCount: group.memberCount,
         createdBy: {
           id: group.createdById,
@@ -588,7 +802,7 @@ app.get("/api/groups", authenticateToken, (req, res) => {
 app.post("/api/groups/:groupId/expenses", authenticateToken, (req, res) => {
   try {
     const groupId = Number(req.params.groupId);
-    const { title, amount, paidById } = req.body;
+    const { title, amount, paidById, photoUrl } = req.body;
 
     if (!Number.isInteger(groupId)) {
       return res.status(400).json({ message: "Invalid group id." });
@@ -601,6 +815,10 @@ app.post("/api/groups/:groupId/expenses", authenticateToken, (req, res) => {
 
     if (group === false) {
       return res.status(403).json({ message: "You are not a member of this group." });
+    }
+
+    if (isGroupDefunct(group)) {
+      return res.status(400).json({ message: "Cannot add expenses to defunct groups." });
     }
 
     if (!title || !title.trim()) {
@@ -640,18 +858,21 @@ app.post("/api/groups/:groupId/expenses", authenticateToken, (req, res) => {
       return res.status(400).json({ message: "Split amounts must add up to the expense amount." });
     }
 
+    // Save photo if provided
+    const savedPhotoUrl = photoUrl ? saveProofImage(photoUrl) : null;
+
     const createExpense = db.transaction(() => {
       const insertExpense = db.prepare(
-        "INSERT INTO expenses (title, amount, paidById, groupId) VALUES (?, ?, ?, ?)"
+        "INSERT INTO expenses (title, amount, paidById, groupId, photoUrl) VALUES (?, ?, ?, ?, ?)"
       );
       const insertSplit = db.prepare(
         "INSERT INTO expense_splits (expenseId, userId, amount) VALUES (?, ?, ?)"
       );
       const selectExpense = db.prepare(
-        "SELECT e.id, e.title, e.amount, e.paidById, e.groupId, u.name AS paidByName, u.email AS paidByEmail FROM expenses e JOIN users u ON u.id = e.paidById WHERE e.id = ?"
+        "SELECT e.id, e.title, e.amount, e.paidById, e.groupId, e.photoUrl, u.name AS paidByName, u.email AS paidByEmail FROM expenses e JOIN users u ON u.id = e.paidById WHERE e.id = ?"
       );
 
-      const result = insertExpense.run(title.trim(), Number(amount), payerId, groupId);
+      const result = insertExpense.run(title.trim(), Number(amount), payerId, groupId, savedPhotoUrl);
       for (const split of normalizedSplits) {
         insertSplit.run(result.lastInsertRowid, split.userId, split.amount);
       }
@@ -677,6 +898,7 @@ app.post("/api/groups/:groupId/expenses", authenticateToken, (req, res) => {
 app.get("/api/groups/:groupId/expenses", authenticateToken, (req, res) => {
   try {
     const groupId = Number(req.params.groupId);
+    const includeSettled = req.query.includeSettled === 'true';
 
     if (!Number.isInteger(groupId)) {
       return res.status(400).json({ message: "Invalid group id." });
@@ -691,11 +913,15 @@ app.get("/api/groups/:groupId/expenses", authenticateToken, (req, res) => {
       return res.status(403).json({ message: "You are not a member of this group." });
     }
 
-    const expenses = db
-      .prepare(
-        "SELECT e.id, e.title, e.amount, e.paidById, u.name AS paidByName, u.email AS paidByEmail, e.groupId FROM expenses e JOIN users u ON u.id = e.paidById WHERE e.groupId = ? ORDER BY e.id DESC"
-      )
-      .all(groupId)
+    const expensesStmt = includeSettled
+      ? db.prepare(
+          "SELECT e.id, e.title, e.amount, e.paidById, e.photoUrl, u.name AS paidByName, u.email AS paidByEmail, e.groupId FROM expenses e JOIN users u ON u.id = e.paidById WHERE e.groupId = ? ORDER BY e.id DESC"
+        )
+      : db.prepare(
+          "SELECT e.id, e.title, e.amount, e.paidById, e.photoUrl, u.name AS paidByName, u.email AS paidByEmail, e.groupId FROM expenses e JOIN users u ON u.id = e.paidById WHERE e.groupId = ? AND e.settled = 0 ORDER BY e.id DESC"
+        );
+
+    const expenses = expensesStmt.all(groupId)
       .map((expense) => ({
         ...expense,
         splits: db
@@ -739,14 +965,14 @@ app.get("/api/groups/:groupId/balances", authenticateToken, (req, res) => {
 app.put("/api/expenses/:expenseId", authenticateToken, (req, res) => {
   try {
     const expenseId = Number(req.params.expenseId);
-    const { title, amount, paidById } = req.body;
+    const { title, amount, paidById, photoUrl } = req.body;
 
     if (!Number.isInteger(expenseId)) {
       return res.status(400).json({ message: "Invalid expense id." });
     }
 
     const expense = db
-      .prepare("SELECT id, title, amount, paidById, groupId FROM expenses WHERE id = ?")
+      .prepare("SELECT id, title, amount, paidById, groupId, photoUrl FROM expenses WHERE id = ?")
       .get(expenseId);
 
     if (!expense) {
@@ -762,11 +988,16 @@ app.put("/api/expenses/:expenseId", authenticateToken, (req, res) => {
       return res.status(403).json({ message: "You are not a member of this group." });
     }
 
+    if (isGroupDefunct(group)) {
+      return res.status(400).json({ message: "Cannot edit expenses in defunct groups." });
+    }
+
     const groupMembers = getGroupMembers(expense.groupId);
 
     const nextTitle = title !== undefined ? title.trim() : expense.title;
     const nextAmount = amount !== undefined ? Number(amount) : Number(expense.amount);
     const nextPaidById = paidById !== undefined && paidById !== null ? Number(paidById) : expense.paidById;
+    const nextPhotoUrl = photoUrl !== undefined ? saveProofImage(photoUrl) : expense.photoUrl;
 
     if (!nextTitle) {
       return res.status(400).json({ message: "Expense title is required." });
@@ -806,8 +1037,8 @@ app.put("/api/expenses/:expenseId", authenticateToken, (req, res) => {
 
     const updateExpense = db.transaction(() => {
       db.prepare(
-        "UPDATE expenses SET title = ?, amount = ?, paidById = ? WHERE id = ?"
-      ).run(nextTitle, nextAmount, nextPaidById, expenseId);
+        "UPDATE expenses SET title = ?, amount = ?, paidById = ?, photoUrl = ? WHERE id = ?"
+      ).run(nextTitle, nextAmount, nextPaidById, nextPhotoUrl, expenseId);
 
       db.prepare("DELETE FROM expense_splits WHERE expenseId = ?").run(expenseId);
       const insertSplit = db.prepare(
@@ -819,7 +1050,7 @@ app.put("/api/expenses/:expenseId", authenticateToken, (req, res) => {
 
       return db
         .prepare(
-          "SELECT e.id, e.title, e.amount, e.paidById, e.groupId, u.name AS paidByName, u.email AS paidByEmail FROM expenses e JOIN users u ON u.id = e.paidById WHERE e.id = ?"
+          "SELECT e.id, e.title, e.amount, e.paidById, e.groupId, e.photoUrl, u.name AS paidByName, u.email AS paidByEmail FROM expenses e JOIN users u ON u.id = e.paidById WHERE e.id = ?"
         )
         .get(expenseId);
     });
@@ -896,13 +1127,13 @@ function calculateUserSettlementsForGroup(groupId, userId) {
 
   const expenses = db
     .prepare(
-      "SELECT e.id, e.title, e.amount, e.paidById, u.name AS paidByName FROM expenses e JOIN users u ON u.id = e.paidById WHERE e.groupId = ? ORDER BY e.id DESC"
+      "SELECT e.id, e.title, e.amount, e.paidById, u.name AS paidByName FROM expenses e JOIN users u ON u.id = e.paidById WHERE e.groupId = ? AND e.settled = 0 ORDER BY e.id DESC"
     )
     .all(groupId);
 
   const allSplits = db
     .prepare(
-      "SELECT es.expenseId, es.userId, es.amount FROM expense_splits es WHERE es.expenseId IN (SELECT id FROM expenses WHERE groupId = ?)"
+      "SELECT es.expenseId, es.userId, es.amount FROM expense_splits es WHERE es.expenseId IN (SELECT id FROM expenses WHERE groupId = ? AND settled = 0)"
     )
     .all(groupId);
 
@@ -1022,6 +1253,53 @@ app.get("/api/user/settlements", authenticateToken, (req, res) => {
   }
 });
 
+app.get("/api/user/settlement-history", authenticateToken, (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Get all settlements involving this user
+    const settlements = db
+      .prepare(
+        `SELECT 
+          s.id, s.payerId, s.receiverId, s.amount, s.groupId, s.createdAt,
+          g.name AS groupName,
+          p.name AS payerName, p.email AS payerEmail,
+          r.name AS receiverName, r.email AS receiverEmail
+         FROM settlements s
+         JOIN groups g ON g.id = s.groupId
+         JOIN users p ON p.id = s.payerId
+         JOIN users r ON r.id = s.receiverId
+         WHERE s.payerId = ? OR s.receiverId = ?
+         ORDER BY s.createdAt DESC`
+      )
+      .all(userId, userId)
+      .map((settlement) => ({
+        id: settlement.id,
+        groupId: settlement.groupId,
+        groupName: settlement.groupName,
+        amount: settlement.amount,
+        createdAt: settlement.createdAt,
+        payer: {
+          id: settlement.payerId,
+          name: settlement.payerName,
+          email: settlement.payerEmail,
+        },
+        receiver: {
+          id: settlement.receiverId,
+          name: settlement.receiverName,
+          email: settlement.receiverEmail,
+        },
+        direction: settlement.payerId === userId ? "paid" : "received",
+        otherPerson: settlement.payerId === userId ? settlement.receiverName : settlement.payerName,
+      }));
+
+    return res.status(200).json({ history: settlements });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Failed to load settlement history." });
+  }
+});
+
 app.post("/api/groups/:groupId/settle", authenticateToken, (req, res) => {
   try {
     const groupId = Number(req.params.groupId);
@@ -1044,6 +1322,14 @@ app.post("/api/groups/:groupId/settle", authenticateToken, (req, res) => {
       return res.status(403).json({ message: "You are not a member of this group." });
     }
 
+    if (isGroupDefunct(group)) {
+      return res.status(400).json({ message: "Defunct groups cannot accept expenses." });
+    }
+
+    if (isGroupDefunct(group)) {
+      return res.status(400).json({ message: "Defunct groups cannot be settled." });
+    }
+
     if (!isGroupMember(groupId, Number(withUserId))) {
       return res.status(400).json({ message: "Target user is not a member of this group." });
     }
@@ -1061,7 +1347,7 @@ app.post("/api/groups/:groupId/settle", authenticateToken, (req, res) => {
     const receiverId = match.direction === "you_owe" ? Number(withUserId) : userId;
 
     db.prepare(
-      "INSERT INTO settlements (payerId, receiverId, amount, groupId) VALUES (?, ?, ?, ?)"
+      "INSERT INTO settlements (payerId, receiverId, amount, groupId, createdAt) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)"
     ).run(payerId, receiverId, match.totalAmount, groupId);
 
     return res.status(201).json({
@@ -1106,6 +1392,141 @@ app.delete("/api/settlements/:id", authenticateToken, (req, res) => {
   } catch (error) {
     console.error(error);
     return res.status(500).json({ message: "Failed to delete settlement." });
+  }
+});
+
+// Helper to save base64 proof images to uploads directory
+function saveProofImage(dataUri) {
+  if (!dataUri || typeof dataUri !== 'string') return null;
+  if (!dataUri.startsWith('data:image')) return dataUri; // treat as external URL
+
+  try {
+    const matches = dataUri.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
+    if (!matches) return null;
+    const ext = matches[1].split('/')[1] || 'png';
+    const base64Data = matches[2];
+    const buffer = Buffer.from(base64Data, 'base64');
+    const uploadsDir = path.join(__dirname, 'uploads');
+    if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+    const filename = `proof_${Date.now()}.${ext}`;
+    const filepath = path.join(uploadsDir, filename);
+    fs.writeFileSync(filepath, buffer);
+    return `/uploads/${filename}`;
+  } catch (err) {
+    console.error('Failed to save proof image', err);
+    return null;
+  }
+}
+
+// Create a payment claim (payer claims they've paid and can attach proof)
+app.post('/api/groups/:groupId/claim', authenticateToken, (req, res) => {
+  try {
+    const groupId = Number(req.params.groupId);
+    const { withUserId, proof } = req.body;
+    const userId = req.user.id;
+
+    if (!Number.isInteger(groupId)) return res.status(400).json({ message: 'Invalid group id.' });
+    if (!withUserId || !Number.isInteger(Number(withUserId))) return res.status(400).json({ message: 'withUserId is required.' });
+
+    const group = isGroupAccessible(groupId, userId);
+    if (!group) return res.status(404).json({ message: 'Group not found.' });
+    if (group === false) return res.status(403).json({ message: 'You are not a member of this group.' });
+    if (isGroupDefunct(group)) return res.status(400).json({ message: 'Defunct groups cannot be settled.' });
+    if (!isGroupMember(groupId, Number(withUserId))) return res.status(400).json({ message: 'Target user is not a member of this group.' });
+
+    // Calculate current balance; claim should only be created by payer (who owes)
+    const settlements = calculateUserSettlementsForGroup(groupId, userId);
+    const match = settlements.find((s) => s.otherUserId === Number(withUserId));
+    if (!match || match.totalAmount < 0.01) return res.status(400).json({ message: 'No outstanding balance with this user.' });
+
+    const payerId = match.direction === 'you_owe' ? userId : Number(withUserId);
+    const receiverId = match.direction === 'you_owe' ? Number(withUserId) : userId;
+
+    // Only the payer (the one who owes) is allowed to create a claim
+    if (payerId !== userId) return res.status(403).json({ message: 'Only the payer can claim a payment.' });
+
+    // Save proof if provided as data URI, otherwise accept as URL or null
+    const proofUrl = proof ? saveProofImage(proof) : null;
+
+    const info = db.prepare('INSERT INTO payment_claims (payerId, receiverId, amount, groupId, proofUrl, status) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(payerId, receiverId, match.totalAmount, groupId, proofUrl, 'pending');
+
+    return res.status(201).json({ message: 'Payment claim created.', claimId: info.lastInsertRowid });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Failed to create payment claim.' });
+  }
+});
+
+// List payment claims involving the current user
+app.get('/api/user/claims', authenticateToken, (req, res) => {
+  try {
+    const userId = req.user.id;
+    const claims = db.prepare('SELECT pc.*, p.name as payerName, r.name as receiverName FROM payment_claims pc JOIN users p ON p.id = pc.payerId JOIN users r ON r.id = pc.receiverId WHERE pc.payerId = ? OR pc.receiverId = ? ORDER BY pc.claimedAt DESC')
+      .all(userId, userId);
+    return res.status(200).json({ claims });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Failed to load claims.' });
+  }
+});
+
+// Approve a payment claim (receiver approves -> insert settlement and mark claim approved)
+app.post('/api/claims/:id/approve', authenticateToken, (req, res) => {
+  try {
+    const claimId = Number(req.params.id);
+    const userId = req.user.id;
+    if (!Number.isInteger(claimId)) return res.status(400).json({ message: 'Invalid claim id.' });
+
+    const claim = db.prepare('SELECT * FROM payment_claims WHERE id = ?').get(claimId);
+    if (!claim) return res.status(404).json({ message: 'Claim not found.' });
+    if (claim.receiverId !== userId) return res.status(403).json({ message: 'Only the receiver can approve this claim.' });
+    if (claim.status !== 'pending') return res.status(400).json({ message: 'Claim is not pending.' });
+
+    // Use transaction to insert settlement and mark related expenses as settled
+    const approveTransaction = db.transaction(() => {
+      // Insert into settlements (this affects balances)
+      db.prepare('INSERT INTO settlements (payerId, receiverId, amount, groupId, createdAt) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)')
+        .run(claim.payerId, claim.receiverId, claim.amount, claim.groupId);
+
+      // Mark all unsettled expenses between these two users in this group as settled
+      db.prepare(
+        "UPDATE expenses SET settled = 1 WHERE groupId = ? AND settled = 0 AND ("
+          + "(paidById = ? AND id IN (SELECT expenseId FROM expense_splits WHERE userId = ?)) OR "
+          + "(paidById = ? AND id IN (SELECT expenseId FROM expense_splits WHERE userId = ?))"
+        + ")"
+      ).run(claim.groupId, claim.payerId, claim.receiverId, claim.receiverId, claim.payerId);
+
+      // Update claim status
+      db.prepare('UPDATE payment_claims SET status = ?, approvedAt = CURRENT_TIMESTAMP, approvedBy = ? WHERE id = ?')
+        .run('approved', userId, claimId);
+    });
+
+    approveTransaction();
+    return res.status(200).json({ message: 'Claim approved and settlement recorded.' });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Failed to approve claim.' });
+  }
+});
+
+// Reject a payment claim (receiver rejects)
+app.post('/api/claims/:id/reject', authenticateToken, (req, res) => {
+  try {
+    const claimId = Number(req.params.id);
+    const userId = req.user.id;
+    if (!Number.isInteger(claimId)) return res.status(400).json({ message: 'Invalid claim id.' });
+
+    const claim = db.prepare('SELECT * FROM payment_claims WHERE id = ?').get(claimId);
+    if (!claim) return res.status(404).json({ message: 'Claim not found.' });
+    if (claim.receiverId !== userId) return res.status(403).json({ message: 'Only the receiver can reject this claim.' });
+    if (claim.status !== 'pending') return res.status(400).json({ message: 'Claim is not pending.' });
+
+    db.prepare('UPDATE payment_claims SET status = ? WHERE id = ?').run('rejected', claimId);
+    return res.status(200).json({ message: 'Claim rejected.' });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Failed to reject claim.' });
   }
 });
 

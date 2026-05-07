@@ -1,23 +1,46 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useState, useCallback, useRef } from 'react'
 import apiClient from '../services/apiClient'
 import { useAuth } from '../context/AuthContext'
+
+function resolveProofUrl(proofUrl) {
+  if (!proofUrl) return ''
+  if (/^https?:\/\//i.test(proofUrl) || proofUrl.startsWith('data:')) return proofUrl
+
+  const apiBaseUrl = apiClient.defaults.baseURL || ''
+  const uploadsBaseUrl = apiBaseUrl.replace(/\/api\/?$/, '')
+  return `${uploadsBaseUrl}${proofUrl}`
+}
 
 export default function Settlements() {
   const { user } = useAuth()
   const [settlements, setSettlements] = useState([])
+  const [claims, setClaims] = useState([])
+  const [history, setHistory] = useState([])
   const [loading, setLoading] = useState(true)
   const [expandedKey, setExpandedKey] = useState(null)
   const [settlingKey, setSettlingKey] = useState(null)
+  const [claimActionKey, setClaimActionKey] = useState(null)
   const [error, setError] = useState('')
+  const claimFileInputRef = useRef(null)
+  const [pendingClaimTarget, setPendingClaimTarget] = useState(null)
 
   const loadSettlements = useCallback(async () => {
     try {
       setLoading(true)
       setError('')
-      const { data } = await apiClient.get('/user/settlements')
+      const [settlementsRes, claimsRes, historyRes] = await Promise.all([
+        apiClient.get('/user/settlements'),
+        apiClient.get('/user/claims'),
+        apiClient.get('/user/settlement-history'),
+      ])
+      const { data } = settlementsRes
       setSettlements(data.settlements || [])
+      setClaims(claimsRes.data.claims || [])
+      setHistory(historyRes.data.history || [])
     } catch {
       setSettlements([])
+      setClaims([])
+      setHistory([])
       setError('Failed to load settlements.')
     } finally {
       setLoading(false)
@@ -36,40 +59,95 @@ export default function Settlements() {
     setExpandedKey((prev) => (prev === key ? null : key))
   }
 
-  async function handleSettle(settlement) {
-    const key = getKey(settlement)
+  function openClaimFilePicker(settlement) {
+    if (settlement.direction !== 'you_owe') {
+      setError('Only the payer can create a payment claim. Use the pending claim card to approve it.')
+      return
+    }
+
     const directionLabel =
       settlement.direction === 'you_owe'
         ? `You owe ${settlement.otherUserName} ₹${settlement.totalAmount.toFixed(2)}`
         : `${settlement.otherUserName} owes you ₹${settlement.totalAmount.toFixed(2)}`
 
     const confirmed = window.confirm(
-      `Mark as settled?\n\n${directionLabel}\nGroup: ${settlement.groupName}\n\nThis will record the payment as complete.`
+      `${directionLabel}\nGroup: ${settlement.groupName}\n\nChoose a screenshot/photo to upload for this claim. The recipient will approve it next.`
     )
 
     if (!confirmed) return
 
-    setSettlingKey(key)
+    setPendingClaimTarget(settlement)
+    claimFileInputRef.current?.click()
+  }
+
+  async function submitClaimWithFile(file) {
+    if (!pendingClaimTarget || !file) {
+      setPendingClaimTarget(null)
+      return
+    }
+
+    setSettlingKey(getKey(pendingClaimTarget))
+
     try {
-      await apiClient.post(`/groups/${settlement.groupId}/settle`, {
-        withUserId: settlement.otherUserId,
+      const proofDataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(reader.result)
+        reader.onerror = () => reject(new Error('Failed to read image file.'))
+        reader.readAsDataURL(file)
       })
+
+      await apiClient.post(`/groups/${pendingClaimTarget.groupId}/claim`, {
+        withUserId: pendingClaimTarget.otherUserId,
+        proof: proofDataUrl,
+      })
+
+      alert('Payment claim created. The recipient must approve to record the settlement.')
       loadSettlements()
     } catch (err) {
-      setError(err?.response?.data?.message || 'Failed to record settlement.')
+      setError(err?.response?.data?.message || 'Failed to create payment claim.')
     } finally {
+      setPendingClaimTarget(null)
       setSettlingKey(null)
+    }
+  }
+
+  async function handleSettle(settlement) {
+    openClaimFilePicker(settlement)
+  }
+
+  async function handleClaimAction(claim, action) {
+    const key = `claim-${claim.id}`
+    setClaimActionKey(key)
+    try {
+      await apiClient.post(`/claims/${claim.id}/${action}`)
+      await loadSettlements()
+    } catch (err) {
+      setError(err?.response?.data?.message || `Failed to ${action} claim.`)
+    } finally {
+      setClaimActionKey(null)
     }
   }
 
   const youOwe = settlements.filter((s) => s.direction === 'you_owe')
   const theyOwe = settlements.filter((s) => s.direction === 'they_owe')
+  const pendingClaims = claims.filter((claim) => claim.status === 'pending')
 
   const totalYouOwe = youOwe.reduce((sum, s) => sum + s.totalAmount, 0)
   const totalTheyOwe = theyOwe.reduce((sum, s) => sum + s.totalAmount, 0)
 
   return (
     <section className="mx-auto flex max-w-7xl flex-col gap-6">
+      <input
+        ref={claimFileInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0]
+          e.target.value = ''
+          submitClaimWithFile(file)
+        }}
+      />
       {/* Header */}
       <div className="flex flex-col gap-2 rounded-2xl border border-slate-200/60 bg-white/80 p-5 shadow-sm backdrop-blur-sm">
         <div className="space-y-1">
@@ -94,15 +172,20 @@ export default function Settlements() {
           <div className="h-8 w-8 animate-spin rounded-full border-3 border-slate-200 border-t-teal-600" />
         </div>
       ) : settlements.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-slate-300 bg-white/50 py-16">
-          <span className="text-5xl">🤝</span>
-          <div className="text-center">
-            <p className="text-base font-semibold text-slate-700">All settled up!</p>
-            <p className="mt-1 text-sm text-slate-400">No outstanding balances with anyone.</p>
+        <div className="space-y-6">
+          <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-slate-300 bg-white/50 py-16">
+            <span className="text-5xl">🤝</span>
+            <div className="text-center">
+              <p className="text-base font-semibold text-slate-700">All settled up!</p>
+              <p className="mt-1 text-sm text-slate-400">No outstanding balances with anyone.</p>
+            </div>
           </div>
+
+          {pendingClaims.length > 0 && <PendingClaimsPanel claims={pendingClaims} currentUserId={user?.id} onAction={handleClaimAction} claimActionKey={claimActionKey} />}
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
           {/* You Owe section */}
           <div className="flex flex-col gap-3">
             <div className="flex items-center justify-between">
@@ -172,6 +255,9 @@ export default function Settlements() {
               </div>
             )}
           </div>
+          </div>
+
+          <PendingClaimsPanel claims={pendingClaims} currentUserId={user?.id} onAction={handleClaimAction} claimActionKey={claimActionKey} />
         </div>
       )}
 
@@ -198,7 +284,153 @@ export default function Settlements() {
           </div>
         </div>
       )}
+
+      {/* Settlement History */}
+      {!loading && history.length > 0 && (
+        <div className="rounded-2xl border border-slate-200/60 bg-white/80 p-5 shadow-sm backdrop-blur-sm">
+          <div className="mb-4">
+            <p className="section-kicker">History</p>
+            <h2 className="text-lg font-bold text-slate-900">Past settlements</h2>
+          </div>
+
+          <div className="space-y-3">
+            {history.map((settlement) => {
+              const date = new Date(settlement.createdAt);
+              const formattedDate = date.toLocaleDateString('en-IN', { 
+                year: 'numeric', 
+                month: 'short', 
+                day: 'numeric' 
+              });
+              const formattedTime = date.toLocaleTimeString('en-IN', { 
+                hour: '2-digit', 
+                minute: '2-digit' 
+              });
+              const isPaid = settlement.direction === 'paid';
+
+              return (
+                <div
+                  key={settlement.id}
+                  className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 transition-all hover:bg-slate-100/50"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span className={`inline-flex h-10 w-10 items-center justify-center rounded-lg text-sm font-bold ${
+                      isPaid 
+                        ? 'bg-blue-50 text-blue-600' 
+                        : 'bg-purple-50 text-purple-600'
+                    }`}>
+                      {isPaid ? '→' : '←'}
+                    </span>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <p className="text-sm font-semibold text-slate-900 truncate">
+                          {isPaid ? `Paid ${settlement.otherPerson}` : `Received from ${settlement.otherPerson}`}
+                        </p>
+                        <span className="text-xs text-slate-500 whitespace-nowrap">
+                          {settlement.groupName}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400">
+                        {formattedDate} at {formattedTime}
+                      </p>
+                    </div>
+                  </div>
+                  <strong className={`shrink-0 text-lg font-bold ${
+                    isPaid ? 'text-blue-600' : 'text-purple-600'
+                  }`}>
+                    {isPaid ? '−' : '+'}₹{settlement.amount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                  </strong>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
     </section>
+  )
+}
+
+function PendingClaimsPanel({ claims, currentUserId, onAction, claimActionKey }) {
+  if (!claims.length) return null
+
+  return (
+    <div className="rounded-2xl border border-amber-200/70 bg-amber-50/70 p-5 shadow-sm">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <div>
+          <p className="section-kicker">Pending Claims</p>
+          <h2 className="text-lg font-bold text-amber-950">Claims waiting for approval</h2>
+        </div>
+        <span className="rounded-full bg-amber-100 px-3 py-1 text-sm font-semibold text-amber-700">
+          {claims.length} pending
+        </span>
+      </div>
+
+      <div className="space-y-3">
+        {claims.map((claim) => {
+          const isReceiver = claim.receiverId === currentUserId
+          const canAct = isReceiver && claim.status === 'pending'
+
+          return (
+            <div key={claim.id} className="rounded-2xl border border-amber-200 bg-white px-4 py-4 shadow-sm">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="truncate text-sm font-semibold text-slate-900">
+                      {claim.payerName} → {claim.receiverName}
+                    </p>
+                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">
+                      {claim.status}
+                    </span>
+                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
+                      {claim.groupId ? `Group #${claim.groupId}` : 'No group'}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-sm text-slate-500">
+                    Amount: ₹{Number(claim.amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                  </p>
+                  {claim.proofUrl && (
+                    <a
+                      className="mt-2 inline-flex text-sm font-medium text-teal-700 underline-offset-2 hover:underline"
+                      href={resolveProofUrl(claim.proofUrl)}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      View payment proof
+                    </a>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {canAct ? (
+                    <>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        disabled={claimActionKey === `claim-${claim.id}`}
+                        onClick={() => onAction(claim, 'approve')}
+                      >
+                        {claimActionKey === `claim-${claim.id}` ? 'Working…' : 'Approve'}
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                        disabled={claimActionKey === `claim-${claim.id}`}
+                        onClick={() => onAction(claim, 'reject')}
+                      >
+                        Reject
+                      </button>
+                    </>
+                  ) : (
+                    <span className="rounded-full bg-slate-100 px-3 py-1 text-sm font-medium text-slate-500">
+                      {isReceiver ? 'Pending your approval' : 'Waiting for receiver'}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
   )
 }
 
@@ -208,6 +440,7 @@ function SettlementCard({ settlement, expanded, settling, currentUserName, onTog
   const s = settlement
   const isYouOwe = s.direction === 'you_owe'
   const accentColor = isYouOwe ? 'red' : 'emerald'
+  const settleLabel = isYouOwe ? (settling ? 'Uploading…' : 'Upload Photo & Claim') : 'Not a claim action'
 
   return (
     <div className="overflow-hidden rounded-2xl border border-slate-200/60 bg-white/90 shadow-sm transition-shadow hover:shadow-md">
@@ -309,13 +542,13 @@ function SettlementCard({ settlement, expanded, settling, currentUserName, onTog
             <button
               type="button"
               className="btn btn-primary"
-              disabled={settling}
+              disabled={settling || !isYouOwe}
               onClick={(e) => {
                 e.stopPropagation()
                 onSettle()
               }}
             >
-              {settling ? 'Recording…' : '✓ Settle Up'}
+              {settleLabel}
             </button>
           </div>
         </div>
