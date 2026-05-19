@@ -144,6 +144,10 @@ if (emailUser && emailPass) {
     port: 465,
     secure: true, // SSL on port 465
     auth: { user: emailUser, pass: emailPass },
+    // Force IPv4 — Render's free tier does not support outbound IPv6.
+    // Without this, smtp.gmail.com resolves to an IPv6 address (AAAA record)
+    // and the connection fails immediately with ENETUNREACH.
+    family: 4,
     // Increase timeouts for cloud environments with cold-start latency
     connectionTimeout: 10000,
     greetingTimeout: 10000,
