@@ -10,67 +10,117 @@ const fs = require("fs");
 require("dotenv").config({ path: path.join(__dirname, ".env") });
 
 const app = express();
-const db = new Database(path.join(__dirname, "dev.db"));
+const dbPath = process.env.DATABASE_PATH || path.join(__dirname, "dev.db");
+const db = new Database(dbPath);
+db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
 
-// Ensure settlements table has groupId column (safe migration)
-try {
-  db.prepare("SELECT groupId FROM settlements LIMIT 0").run();
-} catch {
-  db.prepare("ALTER TABLE settlements ADD COLUMN groupId INTEGER REFERENCES groups(id) ON DELETE CASCADE").run();
+// ─── Self-bootstrapping schema ────────────────────────────────────────────────
+// Uses CREATE TABLE IF NOT EXISTS so this is safe on both fresh and existing DBs.
+// All columns (including ones added later like role, status, mfa_enabled) are
+// declared here — no ALTER TABLE migrations needed.
+function initializeDatabase() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      name           TEXT    NOT NULL,
+      email          TEXT    NOT NULL UNIQUE,
+      password       TEXT    NOT NULL,
+      role           TEXT    NOT NULL DEFAULT 'user',
+      email_verified INTEGER NOT NULL DEFAULT 0,
+      mfa_enabled    INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS groups (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT    NOT NULL,
+      createdById INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      status      TEXT    NOT NULL DEFAULT 'active'
+    );
+
+    CREATE TABLE IF NOT EXISTS group_members (
+      groupId INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      userId  INTEGER NOT NULL REFERENCES users(id)  ON DELETE CASCADE,
+      PRIMARY KEY (groupId, userId)
+    );
+
+    CREATE TABLE IF NOT EXISTS expenses (
+      id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      title    TEXT    NOT NULL,
+      amount   REAL    NOT NULL,
+      paidById INTEGER NOT NULL REFERENCES users(id)  ON DELETE RESTRICT,
+      groupId  INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      photoUrl TEXT,
+      settled  INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS expense_splits (
+      expenseId INTEGER NOT NULL REFERENCES expenses(id) ON DELETE CASCADE,
+      userId    INTEGER NOT NULL REFERENCES users(id)    ON DELETE CASCADE,
+      amount    REAL    NOT NULL,
+      PRIMARY KEY (expenseId, userId)
+    );
+
+    CREATE TABLE IF NOT EXISTS settlements (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      payerId    INTEGER NOT NULL REFERENCES users(id)  ON DELETE CASCADE,
+      receiverId INTEGER NOT NULL REFERENCES users(id)  ON DELETE CASCADE,
+      amount     REAL    NOT NULL,
+      groupId    INTEGER REFERENCES groups(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS payment_claims (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      payerId    INTEGER NOT NULL REFERENCES users(id)  ON DELETE CASCADE,
+      receiverId INTEGER NOT NULL REFERENCES users(id)  ON DELETE CASCADE,
+      amount     REAL    NOT NULL,
+      groupId    INTEGER REFERENCES groups(id) ON DELETE CASCADE,
+      proofUrl   TEXT,
+      status     TEXT    NOT NULL DEFAULT 'pending',
+      claimedAt  DATETIME DEFAULT CURRENT_TIMESTAMP,
+      approvedAt DATETIME,
+      approvedBy INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS otp_codes (
+      id        INTEGER PRIMARY KEY AUTOINCREMENT,
+      userId    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      code      TEXT    NOT NULL,
+      purpose   TEXT    NOT NULL,
+      expiresAt INTEGER NOT NULL,
+      usedAt    INTEGER,
+      createdAt INTEGER NOT NULL
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS users_email_key        ON users(email);
+    CREATE INDEX IF NOT EXISTS groups_createdById_idx        ON groups(createdById);
+    CREATE INDEX IF NOT EXISTS group_members_userId_idx      ON group_members(userId);
+    CREATE INDEX IF NOT EXISTS expenses_paidById_idx         ON expenses(paidById);
+    CREATE INDEX IF NOT EXISTS expenses_groupId_idx          ON expenses(groupId);
+    CREATE INDEX IF NOT EXISTS expense_splits_userId_idx     ON expense_splits(userId);
+    CREATE INDEX IF NOT EXISTS settlements_payerId_idx       ON settlements(payerId);
+    CREATE INDEX IF NOT EXISTS settlements_receiverId_idx    ON settlements(receiverId);
+  `);
+
+  // Safe column additions for existing databases that predate this init function
+  const addColumnIfMissing = (table, column, definition) => {
+    try { db.prepare(`SELECT ${column} FROM ${table} LIMIT 0`).run(); }
+    catch { db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run(); }
+  };
+  addColumnIfMissing('users',   'role',           "TEXT NOT NULL DEFAULT 'user'");
+  addColumnIfMissing('users',   'email_verified',  'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing('users',   'mfa_enabled',     'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing('groups',  'status',          "TEXT NOT NULL DEFAULT 'active'");
+  addColumnIfMissing('settlements', 'groupId',     'INTEGER REFERENCES groups(id) ON DELETE CASCADE');
+
+  console.log(`[DB] Initialized at: ${dbPath}`);
 }
 
-// Ensure payment_claims table exists (safe migration)
-try {
-  db.prepare("SELECT id FROM payment_claims LIMIT 0").run();
-} catch {
-  db.prepare("CREATE TABLE IF NOT EXISTS payment_claims ( id INTEGER PRIMARY KEY AUTOINCREMENT, payerId INTEGER NOT NULL, receiverId INTEGER NOT NULL, amount REAL NOT NULL, groupId INTEGER, proofUrl TEXT, status TEXT NOT NULL DEFAULT 'pending', claimedAt DATETIME DEFAULT CURRENT_TIMESTAMP, approvedAt DATETIME, approvedBy INTEGER, FOREIGN KEY (payerId) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (receiverId) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (groupId) REFERENCES groups(id) ON DELETE CASCADE )").run();
-}
+initializeDatabase();
+// ─────────────────────────────────────────────────────────────────────────────
 
 // Serve uploaded proof images (if any)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
-// Ensure users table has role column (safe migration)
-try {
-  db.prepare("SELECT role FROM users LIMIT 0").run();
-} catch {
-  db.prepare("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'").run();
-}
-
-// Ensure groups table has status column (safe migration)
-try {
-  db.prepare("SELECT status FROM groups LIMIT 0").run();
-} catch {
-  db.prepare("ALTER TABLE groups ADD COLUMN status TEXT NOT NULL DEFAULT 'active'").run();
-}
-
-// Ensure users table has email_verified column (safe migration)
-try {
-  db.prepare("SELECT email_verified FROM users LIMIT 0").run();
-} catch {
-  db.prepare("ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 1").run();
-}
-
-// Ensure users table has mfa_enabled column (safe migration)
-try {
-  db.prepare("SELECT mfa_enabled FROM users LIMIT 0").run();
-} catch {
-  db.prepare("ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0").run();
-}
-
-// Create otp_codes table if it doesn't exist
-db.prepare(`
-  CREATE TABLE IF NOT EXISTS otp_codes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    userId INTEGER NOT NULL,
-    code TEXT NOT NULL,
-    purpose TEXT NOT NULL,
-    expiresAt INTEGER NOT NULL,
-    usedAt INTEGER,
-    createdAt INTEGER NOT NULL,
-    FOREIGN KEY (userId) REFERENCES users(id) ON DELETE CASCADE
-  )
-`).run();
 
 const jwtSecret = process.env.JWT_SECRET;
 const adminEmail = (process.env.ADMIN_EMAIL || "admin@smartsplit.local").trim().toLowerCase();
