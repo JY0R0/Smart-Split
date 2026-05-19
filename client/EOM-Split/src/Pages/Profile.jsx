@@ -1,9 +1,34 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import { useAuth } from '../context/AuthContext'
+import apiClient from '../services/apiClient'
 
 export default function Profile() {
   const { user } = useAuth()
   const initials = (user?.name || 'U').charAt(0).toUpperCase()
+
+  const [mfaEnabled, setMfaEnabled] = useState(false)
+  const [mfaLoading, setMfaLoading] = useState(false)
+  const [mfaMsg, setMfaMsg] = useState('')
+
+  useEffect(() => {
+    apiClient.get('/auth/mfa')
+      .then(({ data }) => setMfaEnabled(data.mfaEnabled))
+      .catch(() => {})
+  }, [])
+
+  async function toggleMfa() {
+    setMfaLoading(true)
+    setMfaMsg('')
+    try {
+      const { data } = await apiClient.patch('/auth/mfa', { enabled: !mfaEnabled })
+      setMfaEnabled(data.mfaEnabled)
+      setMfaMsg(data.message)
+    } catch (err) {
+      setMfaMsg(err?.response?.data?.message || 'Failed to update 2FA setting.')
+    } finally {
+      setMfaLoading(false)
+    }
+  }
 
   return (
     <section className="mx-auto flex max-w-7xl flex-col gap-6">
@@ -12,7 +37,7 @@ export default function Profile() {
         <div className="space-y-1">
           <p className="section-kicker">Account</p>
           <h1 className="text-2xl font-bold text-slate-900 sm:text-3xl">Profile</h1>
-          <p className="max-w-2xl text-sm text-slate-500">Review your account details and keep your split history tidy.</p>
+          <p className="max-w-2xl text-sm text-slate-500">Review your account details and manage security settings.</p>
         </div>
       </div>
 
@@ -30,6 +55,7 @@ export default function Profile() {
         </article>
 
         <div className="grid gap-4 lg:col-span-2">
+          {/* Personal details */}
           <article className="profile-card">
             <div className="flex items-center gap-3 mb-3">
               <span className="grid h-9 w-9 place-items-center rounded-xl bg-teal-50 text-base">📋</span>
@@ -51,9 +77,56 @@ export default function Profile() {
             </div>
           </article>
 
+          {/* Two-Factor Authentication */}
           <article className="profile-card">
             <div className="flex items-center gap-3 mb-3">
-              <span className="grid h-9 w-9 place-items-center rounded-xl bg-indigo-50 text-base">📊</span>
+              <span className="grid h-9 w-9 place-items-center rounded-xl bg-indigo-50 text-base">🔐</span>
+              <h3 className="text-base font-bold text-slate-900">Two-Factor Authentication</h3>
+            </div>
+            <p className="text-sm text-slate-500 mb-4">
+              When enabled, you'll be sent a one-time code to your email every time you log in for extra security.
+            </p>
+
+            <div className="flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+              <div>
+                <p className="text-sm font-semibold text-slate-900">
+                  {mfaEnabled ? '2FA is active' : '2FA is inactive'}
+                </p>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {mfaEnabled ? 'Email verification required at every login.' : 'Only your password is required to log in.'}
+                </p>
+              </div>
+              {/* Toggle switch */}
+              <button
+                id="mfa-toggle"
+                type="button"
+                role="switch"
+                aria-checked={mfaEnabled}
+                disabled={mfaLoading}
+                onClick={toggleMfa}
+                className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none focus:ring-4 focus:ring-teal-100 disabled:opacity-50 ${
+                  mfaEnabled ? 'bg-teal-500' : 'bg-slate-200'
+                }`}
+              >
+                <span
+                  className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-md transition-transform duration-200 ${
+                    mfaEnabled ? 'translate-x-5' : 'translate-x-0.5'
+                  }`}
+                />
+              </button>
+            </div>
+
+            {mfaMsg && (
+              <p className={`mt-3 text-sm font-medium ${mfaEnabled ? 'text-teal-700' : 'text-slate-500'}`}>
+                {mfaMsg}
+              </p>
+            )}
+          </article>
+
+          {/* Activity */}
+          <article className="profile-card">
+            <div className="flex items-center gap-3 mb-3">
+              <span className="grid h-9 w-9 place-items-center rounded-xl bg-amber-50 text-base">📊</span>
               <h3 className="text-base font-bold text-slate-900">Activity</h3>
             </div>
             <p className="text-sm text-slate-500">

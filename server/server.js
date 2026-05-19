@@ -2,6 +2,8 @@ const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
+const nodemailer = require("nodemailer");
 const Database = require("better-sqlite3");
 const path = require("path");
 const fs = require("fs");
@@ -42,10 +44,118 @@ try {
   db.prepare("ALTER TABLE groups ADD COLUMN status TEXT NOT NULL DEFAULT 'active'").run();
 }
 
+// Ensure users table has email_verified column (safe migration)
+try {
+  db.prepare("SELECT email_verified FROM users LIMIT 0").run();
+} catch {
+  db.prepare("ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 1").run();
+}
+
+// Ensure users table has mfa_enabled column (safe migration)
+try {
+  db.prepare("SELECT mfa_enabled FROM users LIMIT 0").run();
+} catch {
+  db.prepare("ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0").run();
+}
+
+// Create otp_codes table if it doesn't exist
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS otp_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    userId INTEGER NOT NULL,
+    code TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    expiresAt INTEGER NOT NULL,
+    usedAt INTEGER,
+    createdAt INTEGER NOT NULL,
+    FOREIGN KEY (userId) REFERENCES users(id) ON DELETE CASCADE
+  )
+`).run();
+
 const jwtSecret = process.env.JWT_SECRET;
 const adminEmail = (process.env.ADMIN_EMAIL || "admin@smartsplit.local").trim().toLowerCase();
 const adminPassword = process.env.ADMIN_PASSWORD || "Admin@123";
 const adminName = (process.env.ADMIN_NAME || "Smart Split Admin").trim();
+
+// ─── Email / OTP helpers ────────────────────────────────────────────────────
+const emailUser = process.env.EMAIL_USER;
+const emailPass = process.env.EMAIL_PASS;
+const emailFrom = process.env.EMAIL_FROM || (emailUser ? `Smart Split <${emailUser}>` : null);
+
+let mailer = null;
+if (emailUser && emailPass) {
+  mailer = nodemailer.createTransport({
+    service: 'gmail',
+    auth: { user: emailUser, pass: emailPass },
+  });
+  console.log(`[Email] Mailer ready — sending from ${emailUser}`);
+} else {
+  console.warn('[Email] EMAIL_USER / EMAIL_PASS not set — OTPs will be printed to the console (dev mode)');
+}
+
+function generateOtp() {
+  return String(crypto.randomInt(100000, 999999));
+}
+
+async function sendOtpEmail(to, otp, purpose) {
+  const isRegister = purpose === 'register';
+  const subject = isRegister ? 'Verify your Smart Split account' : 'Your Smart Split login code';
+  const heading = isRegister ? 'Confirm your email address' : 'Two-factor authentication';
+  const body = isRegister
+    ? 'Use the code below to verify your email and activate your Smart Split account.'
+    : 'Use the code below to complete your login. Do not share this code.';
+
+  const html = `<!DOCTYPE html>
+<html><body style="font-family:Inter,system-ui,sans-serif;background:#f8fafc;margin:0;padding:40px 0;">
+  <div style="max-width:420px;margin:0 auto;background:#fff;border-radius:16px;padding:40px 32px;box-shadow:0 4px 24px rgba(0,0,0,.08);">
+    <div style="text-align:center;margin-bottom:32px;">
+      <div style="display:inline-block;background:linear-gradient(135deg,#0d9488,#34d399);border-radius:12px;padding:12px 18px;font-size:20px;font-weight:700;color:#fff;">S</div>
+      <p style="font-size:20px;font-weight:700;color:#0f172a;margin:16px 0 4px;">Smart Split</p>
+    </div>
+    <h2 style="font-size:18px;font-weight:700;color:#0f172a;margin:0 0 8px;">${heading}</h2>
+    <p style="font-size:14px;color:#64748b;margin:0 0 28px;line-height:1.6;">${body}</p>
+    <div style="background:#f0fdf4;border:2px solid #bbf7d0;border-radius:12px;padding:24px;text-align:center;margin-bottom:28px;">
+      <span style="font-size:36px;font-weight:700;letter-spacing:10px;color:#0d9488;">${otp}</span>
+    </div>
+    <p style="font-size:12px;color:#94a3b8;text-align:center;margin:0;">This code expires in <strong>10 minutes</strong>.</p>
+  </div>
+</body></html>`;
+
+  if (mailer) {
+    await mailer.sendMail({ from: emailFrom, to, subject, html });
+  } else {
+    console.log(`\n[OTP DEV MODE] ──────────────────────`);
+    console.log(`  To:      ${to}`);
+    console.log(`  Purpose: ${purpose}`);
+    console.log(`  Code:    ${otp}`);
+    console.log(`──────────────────────────────────────\n`);
+  }
+}
+
+function createOtp(userId, purpose) {
+  const code = generateOtp();
+  const now = Date.now();
+  const expiresAt = now + 10 * 60 * 1000;
+  db.prepare("INSERT INTO otp_codes (userId, code, purpose, expiresAt, createdAt) VALUES (?, ?, ?, ?, ?)").run(userId, code, purpose, expiresAt, now);
+  return code;
+}
+
+function validateOtp(userId, code, purpose) {
+  const now = Date.now();
+  const otp = db.prepare("SELECT id, code, expiresAt, usedAt FROM otp_codes WHERE userId = ? AND purpose = ? AND usedAt IS NULL ORDER BY id DESC LIMIT 1").get(userId, purpose);
+  if (!otp) return { valid: false, reason: 'No verification code found. Please request a new one.' };
+  if (now > otp.expiresAt) return { valid: false, reason: 'Code has expired. Please request a new one.' };
+  if (otp.code !== String(code).trim()) return { valid: false, reason: 'Incorrect code. Please try again.' };
+  db.prepare("UPDATE otp_codes SET usedAt = ? WHERE id = ?").run(now, otp.id);
+  return { valid: true };
+}
+
+function canResendOtp(userId, purpose, cooldownMs = 60000) {
+  const last = db.prepare("SELECT createdAt FROM otp_codes WHERE userId = ? AND purpose = ? ORDER BY id DESC LIMIT 1").get(userId, purpose);
+  if (!last) return true;
+  return (Date.now() - last.createdAt) >= cooldownMs;
+}
+// ────────────────────────────────────────────────────────────────────────────
 
 async function ensureAdminAccount() {
   const existingAdmin = db
@@ -290,12 +400,13 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-app.post("/api/auth/register", async (req, res) => {
+// Step 1: initiate registration — create unverified user and send OTP
+app.post("/api/auth/register/initiate", async (req, res) => {
   try {
     const { name, email, password } = req.body;
 
-    if (!email || !password) {
-      return res.status(400).json({ message: "Email and password are required." });
+    if (!name || !email || !password) {
+      return res.status(400).json({ message: "Name, email and password are required." });
     }
 
     if (!jwtSecret) {
@@ -303,26 +414,50 @@ app.post("/api/auth/register", async (req, res) => {
     }
 
     const normalizedEmail = email.trim().toLowerCase();
-    const existingUser = db
-      .prepare("SELECT id FROM users WHERE email = ?")
-      .get(normalizedEmail);
+    const existingUser = db.prepare("SELECT id, email_verified FROM users WHERE email = ?").get(normalizedEmail);
 
-    if (existingUser) {
-      return res.status(409).json({ message: "User already exists." });
+    if (existingUser && existingUser.email_verified) {
+      return res.status(409).json({ message: "An account with this email already exists." });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const displayName = (name && name.trim()) || normalizedEmail.split("@")[0];
 
-    const insertUser = db.prepare(
-      "INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, 'user')"
-    );
-    const selectUser = db.prepare(
-      "SELECT id, name, email, role FROM users WHERE id = ?"
-    );
+    let userId;
+    if (existingUser && !existingUser.email_verified) {
+      db.prepare("UPDATE users SET name = ?, password = ? WHERE id = ?").run(displayName, hashedPassword, existingUser.id);
+      userId = existingUser.id;
+    } else {
+      const result = db.prepare("INSERT INTO users (name, email, password, role, email_verified) VALUES (?, ?, ?, 'user', 0)").run(displayName, normalizedEmail, hashedPassword);
+      userId = result.lastInsertRowid;
+    }
 
-    const result = insertUser.run(displayName, normalizedEmail, hashedPassword);
-    const user = selectUser.get(result.lastInsertRowid);
+    const otp = createOtp(userId, 'register');
+    await sendOtpEmail(normalizedEmail, otp, 'register');
+
+    return res.status(200).json({ userId, message: "Verification code sent to your email." });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Failed to initiate registration." });
+  }
+});
+
+// Step 2: verify OTP and activate account
+app.post("/api/auth/register/verify", async (req, res) => {
+  try {
+    const { userId, otp } = req.body;
+
+    if (!userId || !otp) {
+      return res.status(400).json({ message: "userId and otp are required." });
+    }
+
+    const result = validateOtp(Number(userId), String(otp), 'register');
+    if (!result.valid) {
+      return res.status(400).json({ message: result.reason });
+    }
+
+    db.prepare("UPDATE users SET email_verified = 1 WHERE id = ?").run(Number(userId));
+    const user = db.prepare("SELECT id, name, email, role FROM users WHERE id = ?").get(Number(userId));
 
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role || "user" },
@@ -330,13 +465,10 @@ app.post("/api/auth/register", async (req, res) => {
       { expiresIn: "7d" }
     );
 
-    return res.status(201).json({
-      user,
-      token,
-    });
+    return res.status(201).json({ user, token });
   } catch (error) {
     console.error(error);
-    return res.status(500).json({ message: "Failed to register user." });
+    return res.status(500).json({ message: "Failed to verify registration." });
   }
 });
 
@@ -354,17 +486,27 @@ app.post("/api/auth/login", async (req, res) => {
 
     const normalizedEmail = email.trim().toLowerCase();
     const user = db
-      .prepare("SELECT id, name, email, password, role FROM users WHERE email = ?")
+      .prepare("SELECT id, name, email, password, role, email_verified, mfa_enabled FROM users WHERE email = ?")
       .get(normalizedEmail);
 
     if (!user) {
       return res.status(401).json({ message: "Invalid email or password." });
     }
 
+    if (!user.email_verified) {
+      return res.status(403).json({ message: "Please verify your email before logging in.", needsVerification: true, userId: user.id });
+    }
+
     const passwordMatches = await bcrypt.compare(password, user.password);
 
     if (!passwordMatches) {
       return res.status(401).json({ message: "Invalid email or password." });
+    }
+
+    if (user.mfa_enabled) {
+      const otp = createOtp(user.id, 'login');
+      await sendOtpEmail(user.email, otp, 'login');
+      return res.status(200).json({ mfaRequired: true, userId: user.id, message: "Verification code sent to your email." });
     }
 
     const token = jwt.sign(
@@ -385,6 +527,81 @@ app.post("/api/auth/login", async (req, res) => {
   } catch (error) {
     console.error(error);
     return res.status(500).json({ message: "Failed to log in user." });
+  }
+});
+
+// Verify OTP for login 2FA
+app.post("/api/auth/login/verify", async (req, res) => {
+  try {
+    const { userId, otp } = req.body;
+    if (!userId || !otp) {
+      return res.status(400).json({ message: "userId and otp are required." });
+    }
+    const result = validateOtp(Number(userId), String(otp), 'login');
+    if (!result.valid) {
+      return res.status(400).json({ message: result.reason });
+    }
+    const user = db.prepare("SELECT id, name, email, role FROM users WHERE id = ?").get(Number(userId));
+    if (!user) return res.status(404).json({ message: "User not found." });
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role || "user" },
+      jwtSecret,
+      { expiresIn: "7d" }
+    );
+    return res.status(200).json({ user: { id: user.id, name: user.name, email: user.email, role: user.role || "user" }, token });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Failed to verify login code." });
+  }
+});
+
+// Resend OTP (register or login)
+app.post("/api/auth/resend-otp", async (req, res) => {
+  try {
+    const { userId, purpose } = req.body;
+    if (!userId || !['register', 'login'].includes(purpose)) {
+      return res.status(400).json({ message: "userId and valid purpose required." });
+    }
+    const user = db.prepare("SELECT id, email FROM users WHERE id = ?").get(Number(userId));
+    if (!user) return res.status(404).json({ message: "User not found." });
+    if (!canResendOtp(Number(userId), purpose)) {
+      return res.status(429).json({ message: "Please wait 60 seconds before requesting a new code." });
+    }
+    const otp = createOtp(Number(userId), purpose);
+    await sendOtpEmail(user.email, otp, purpose);
+    return res.status(200).json({ message: "A new code has been sent to your email." });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Failed to resend code." });
+  }
+});
+
+// Get MFA status
+app.get("/api/auth/mfa", authenticateToken, (req, res) => {
+  try {
+    const user = db.prepare("SELECT mfa_enabled FROM users WHERE id = ?").get(req.user.id);
+    return res.status(200).json({ mfaEnabled: Boolean(user?.mfa_enabled) });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Failed to get MFA status." });
+  }
+});
+
+// Toggle MFA
+app.patch("/api/auth/mfa", authenticateToken, (req, res) => {
+  try {
+    const { enabled } = req.body;
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ message: "'enabled' must be a boolean." });
+    }
+    db.prepare("UPDATE users SET mfa_enabled = ? WHERE id = ?").run(enabled ? 1 : 0, req.user.id);
+    return res.status(200).json({
+      message: enabled ? "Two-factor authentication enabled." : "Two-factor authentication disabled.",
+      mfaEnabled: enabled,
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Failed to update 2FA setting." });
   }
 });
 
