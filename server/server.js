@@ -128,17 +128,34 @@ const adminPassword = process.env.ADMIN_PASSWORD || "Admin@123";
 const adminName = (process.env.ADMIN_NAME || "Smart Split Admin").trim();
 
 // ─── Email / OTP helpers ────────────────────────────────────────────────────
-const emailUser = process.env.EMAIL_USER;
-const emailPass = process.env.EMAIL_PASS;
+const emailUser = process.env.EMAIL_USER?.trim();
+const emailPass = process.env.EMAIL_PASS?.trim();
 const emailFrom = process.env.EMAIL_FROM || (emailUser ? `Smart Split <${emailUser}>` : null);
 
 let mailer = null;
 if (emailUser && emailPass) {
+  // Use explicit SMTP settings instead of the 'gmail' service shorthand.
+  // The shorthand is unreliable on cloud servers (Render, Railway, etc.) because
+  // it doesn't pin the port/security settings, leading to silent timeouts.
   mailer = nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true, // SSL on port 465
     auth: { user: emailUser, pass: emailPass },
+    // Increase timeouts for cloud environments with cold-start latency
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 15000,
   });
-  console.log(`[Email] Mailer ready — sending from ${emailUser}`);
+  // Verify credentials immediately so any config error shows up in startup logs.
+  mailer.verify((err) => {
+    if (err) {
+      console.error(`[Email] SMTP verification FAILED: ${err.message}`);
+      console.error('[Email] Check EMAIL_USER and EMAIL_PASS env vars. Gmail requires an App Password (not your account password).');
+    } else {
+      console.log(`[Email] SMTP ready — sending from ${emailUser}`);
+    }
+  });
 } else {
   console.warn('[Email] EMAIL_USER / EMAIL_PASS not set — OTPs will be printed to the console (dev mode)');
 }
@@ -172,7 +189,13 @@ async function sendOtpEmail(to, otp, purpose) {
 </body></html>`;
 
   if (mailer) {
-    await mailer.sendMail({ from: emailFrom, to, subject, html });
+    try {
+      await mailer.sendMail({ from: emailFrom, to, subject, html });
+      console.log(`[Email] OTP sent to ${to} (purpose: ${purpose})`);
+    } catch (err) {
+      console.error(`[Email] Failed to send OTP to ${to}: ${err.message}`);
+      throw new Error('Failed to send verification email. Please try again later.');
+    }
   } else {
     console.log(`\n[OTP DEV MODE] ──────────────────────`);
     console.log(`  To:      ${to}`);
