@@ -108,7 +108,9 @@ function initializeDatabase() {
     catch { db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run(); }
   };
   addColumnIfMissing('users',   'role',           "TEXT NOT NULL DEFAULT 'user'");
-  addColumnIfMissing('users',   'email_verified',  'INTEGER NOT NULL DEFAULT 0');
+  // DEFAULT 1 = treat pre-existing users as already verified (they registered
+  // before the OTP email-verification flow was introduced).
+  addColumnIfMissing('users',   'email_verified',  'INTEGER NOT NULL DEFAULT 1');
   addColumnIfMissing('users',   'mfa_enabled',     'INTEGER NOT NULL DEFAULT 0');
   addColumnIfMissing('groups',  'status',          "TEXT NOT NULL DEFAULT 'active'");
   addColumnIfMissing('settlements', 'groupId',     'INTEGER REFERENCES groups(id) ON DELETE CASCADE');
@@ -598,8 +600,8 @@ app.post("/api/auth/login", async (req, res) => {
       token,
     });
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ message: "Failed to log in user." });
+    console.error('[Login] Unexpected error:', error.message, error.stack);
+    return res.status(500).json({ message: "Failed to log in user.", detail: error.message });
   }
 });
 
