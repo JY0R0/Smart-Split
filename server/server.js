@@ -1,3 +1,10 @@
+// Force IPv4-first DNS resolution globally.
+// Render's free tier has no outbound IPv6 routing. Without this, Node.js
+// resolves hostnames (e.g. smtp.gmail.com) to IPv6 (AAAA records) first,
+// causing immediate ENETUNREACH failures for all outbound connections.
+const dns = require("dns");
+dns.setDefaultResultOrder("ipv4first");
+
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
