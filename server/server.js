@@ -154,6 +154,7 @@ const emailUser = process.env.EMAIL_USER?.trim();
 const emailPass = process.env.EMAIL_PASS?.trim();
 const emailFrom = process.env.EMAIL_FROM || (emailUser ? `Smart Split <${emailUser}>` : null);
 const resendFrom = process.env.RESEND_FROM?.trim() || emailFrom || 'onboarding@resend.dev';
+const emailProvider = (process.env.EMAIL_PROVIDER || 'auto').trim().toLowerCase(); // auto | resend | smtp
 
 let mailer = null;
 if (emailUser && emailPass) {
@@ -215,8 +216,11 @@ async function sendOtpEmail(to, otp, purpose) {
   </div>
 </body></html>`;
 
-  // Prefer Resend API (HTTPS) when configured — works reliably on Render
-  if (resendClient) {
+  const tryResend = emailProvider === 'resend' || (emailProvider === 'auto' && !!resendClient);
+  const trySmtp = emailProvider === 'smtp' || (emailProvider === 'auto' && !!mailer);
+
+  // Resend can be sandbox-limited when sender/domain is not fully verified.
+  if (tryResend && resendClient) {
     try {
       const resendResult = await resendClient.emails.send({
         from: resendFrom,
@@ -235,21 +239,29 @@ async function sendOtpEmail(to, otp, purpose) {
     }
   }
 
-  if (mailer) {
+  if (trySmtp && mailer) {
     try {
       await mailer.sendMail({ from: emailFrom, to, subject, html });
       console.log(`[Email] OTP sent to ${to} (purpose: ${purpose})`);
+      return;
     } catch (err) {
       console.error(`[Email] Failed to send OTP to ${to}: ${err.message}`);
       throw new Error('Failed to send verification email. Please try again later.');
     }
-  } else {
-    console.log(`\n[OTP DEV MODE] ──────────────────────`);
-    console.log(`  To:      ${to}`);
-    console.log(`  Purpose: ${purpose}`);
-    console.log(`  Code:    ${otp}`);
-    console.log(`──────────────────────────────────────\n`);
   }
+
+  if (emailProvider === 'resend' && !resendClient) {
+    throw new Error('Email provider is set to resend, but RESEND_API_KEY is missing.');
+  }
+  if (emailProvider === 'smtp' && !mailer) {
+    throw new Error('Email provider is set to smtp, but EMAIL_USER/EMAIL_PASS are missing.');
+  }
+
+  console.log(`\n[OTP DEV MODE] ──────────────────────`);
+  console.log(`  To:      ${to}`);
+  console.log(`  Purpose: ${purpose}`);
+  console.log(`  Code:    ${otp}`);
+  console.log(`──────────────────────────────────────\n`);
 }
 
 function createOtp(userId, purpose) {
