@@ -10,6 +10,7 @@ const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const https = require("https");
 const nodemailer = require("nodemailer");
 // Resend API client (HTTPS-based transactional email) — works reliably on Render
 let resendClient = null;
@@ -154,7 +155,8 @@ const emailUser = process.env.EMAIL_USER?.trim();
 const emailPass = process.env.EMAIL_PASS?.trim();
 const emailFrom = process.env.EMAIL_FROM || (emailUser ? `Smart Split <${emailUser}>` : null);
 const resendFrom = process.env.RESEND_FROM?.trim() || emailFrom || 'onboarding@resend.dev';
-const emailProvider = (process.env.EMAIL_PROVIDER || 'auto').trim().toLowerCase(); // auto | resend | smtp
+const brevoApiKey = process.env.BREVO_API_KEY?.trim();
+const emailProvider = (process.env.EMAIL_PROVIDER || 'auto').trim().toLowerCase(); // auto | resend | brevo | smtp
 
 let mailer = null;
 if (emailUser && emailPass) {
@@ -192,6 +194,74 @@ function generateOtp() {
   return String(crypto.randomInt(100000, 999999));
 }
 
+function parseFromAddress(fromValue) {
+  const raw = String(fromValue || '').trim();
+  if (!raw) return { email: '', name: 'Smart Split' };
+  const match = raw.match(/^(.*)<([^>]+)>\s*$/);
+  if (match) {
+    return {
+      name: (match[1] || '').trim().replace(/^"|"$/g, '') || 'Smart Split',
+      email: (match[2] || '').trim(),
+    };
+  }
+  return { email: raw, name: 'Smart Split' };
+}
+
+function sendViaBrevo({ to, subject, html }) {
+  return new Promise((resolve, reject) => {
+    if (!brevoApiKey) {
+      reject(new Error('BREVO_API_KEY is not configured.'));
+      return;
+    }
+
+    const sender = parseFromAddress(emailFrom || resendFrom);
+    if (!sender.email) {
+      reject(new Error('EMAIL_FROM must be set for Brevo (e.g., Smart Split <smartsplitauth@gmail.com>).'));
+      return;
+    }
+
+    const payload = JSON.stringify({
+      sender,
+      to: [{ email: String(to).trim() }],
+      subject,
+      htmlContent: html,
+    });
+
+    const req = https.request(
+      {
+        hostname: 'api.brevo.com',
+        path: '/v3/smtp/email',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'api-key': brevoApiKey,
+          'Content-Length': Buffer.byteLength(payload),
+        },
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => {
+          let parsed = null;
+          try { parsed = body ? JSON.parse(body) : null; } catch (_) { parsed = null; }
+
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            resolve(parsed || { ok: true });
+            return;
+          }
+
+          const errMsg = parsed?.message || parsed?.code || `Brevo send failed with status ${res.statusCode}`;
+          reject(new Error(errMsg));
+        });
+      }
+    );
+
+    req.on('error', (err) => reject(err));
+    req.write(payload);
+    req.end();
+  });
+}
+
 async function sendOtpEmail(to, otp, purpose) {
   const isRegister = purpose === 'register';
   const subject = isRegister ? 'Verify your Smart Split account' : 'Your Smart Split login code';
@@ -217,6 +287,7 @@ async function sendOtpEmail(to, otp, purpose) {
 </body></html>`;
 
   const tryResend = emailProvider === 'resend' || (emailProvider === 'auto' && !!resendClient);
+  const tryBrevo = emailProvider === 'brevo' || (emailProvider === 'auto' && !!brevoApiKey);
   const trySmtp = emailProvider === 'smtp' || (emailProvider === 'auto' && !!mailer);
 
   // Resend can be sandbox-limited when sender/domain is not fully verified.
@@ -250,8 +321,24 @@ async function sendOtpEmail(to, otp, purpose) {
     }
   }
 
+  if (tryBrevo) {
+    try {
+      await sendViaBrevo({ to, subject, html });
+      console.log(`[Email] OTP sent via Brevo to ${to} (purpose: ${purpose})`);
+      return;
+    } catch (err) {
+      console.error(`[Email] Brevo send failed: ${err.message}`);
+      if (emailProvider === 'brevo') {
+        throw new Error('Failed to send verification email. Please check BREVO_API_KEY and sender verification.');
+      }
+    }
+  }
+
   if (emailProvider === 'resend' && !resendClient) {
     throw new Error('Email provider is set to resend, but RESEND_API_KEY is missing.');
+  }
+  if (emailProvider === 'brevo' && !brevoApiKey) {
+    throw new Error('Email provider is set to brevo, but BREVO_API_KEY is missing.');
   }
   if (emailProvider === 'smtp' && !mailer) {
     throw new Error('Email provider is set to smtp, but EMAIL_USER/EMAIL_PASS are missing.');
