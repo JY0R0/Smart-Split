@@ -43,23 +43,50 @@ export default function Login() {
     }
   }
 
-  // Initialize Google Sign-In button
+  // Initialize Google Sign-In button (poll until SDK loads)
   React.useEffect(() => {
-    if (window.google) {
-      window.google.accounts.id.initialize({
-        client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID || '',
-        callback: (response) => {
-          handleGoogleSignIn(response.credential)
-        },
-      })
-      const googleButtonElement = document.getElementById('google-signin-button')
-      if (googleButtonElement) {
-        window.google.accounts.id.renderButton(googleButtonElement, {
-          theme: 'outline',
-          size: 'large',
-          width: '100%',
-        })
+    let mounted = true
+    let attempts = 0
+    const maxAttempts = 20
+    const intervalMs = 500
+
+    const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || ''
+    if (!clientId) {
+      console.warn('VITE_GOOGLE_CLIENT_ID is not set')
+      return
+    }
+
+    function tryInit() {
+      if (!mounted) return
+      if (window.google && window.google.accounts && window.google.accounts.id) {
+        try {
+          window.google.accounts.id.initialize({
+            client_id: clientId,
+            callback: (response) => {
+              handleGoogleSignIn(response.credential)
+            },
+          })
+          const el = document.getElementById('google-signin-button')
+          if (el) {
+            window.google.accounts.id.renderButton(el, { theme: 'outline', size: 'large', width: '100%' })
+          }
+        } catch (err) {
+          console.error('Failed to initialize Google Sign-In', err)
+        }
+        return
       }
+
+      attempts += 1
+      if (attempts < maxAttempts) {
+        setTimeout(tryInit, intervalMs)
+      } else {
+        console.warn('Google Sign-In SDK not available after polling')
+      }
+    }
+
+    tryInit()
+    return () => {
+      mounted = false
     }
   }, [])
 
