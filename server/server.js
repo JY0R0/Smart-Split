@@ -692,6 +692,33 @@ app.post("/api/auth/resend-otp", async (req, res) => {
   }
 });
 
+// Passwordless login: initiate (send OTP to email)
+app.post("/api/auth/passwordless/initiate", async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ message: "Email is required." });
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    let user = db.prepare("SELECT id, email_verified FROM users WHERE email = ?").get(normalizedEmail);
+
+    if (!user) {
+      // create a lightweight account (password is random) and mark email verified
+      const displayName = normalizedEmail.split("@")[0];
+      const hashed = await bcrypt.hash(crypto.randomBytes(16).toString("hex"), 10);
+      const result = db.prepare("INSERT INTO users (name, email, password, role, email_verified) VALUES (?, ?, ?, 'user', 1)").run(displayName, normalizedEmail, hashed);
+      user = { id: result.lastInsertRowid, email_verified: 1 };
+    }
+
+    const otp = createOtp(Number(user.id), 'login');
+    await sendOtpEmail(normalizedEmail, otp, 'login');
+
+    return res.status(200).json({ userId: user.id, message: "Verification code sent to your email." });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Failed to initiate passwordless login." });
+  }
+});
+
 // Get MFA status
 app.get("/api/auth/mfa", authenticateToken, (req, res) => {
   try {
