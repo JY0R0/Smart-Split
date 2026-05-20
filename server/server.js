@@ -11,6 +11,19 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const nodemailer = require("nodemailer");
+// Resend API client (HTTPS-based transactional email) — works reliably on Render
+let resendClient = null;
+try {
+  const { Resend } = require('resend');
+  const resendKey = process.env.RESEND_API_KEY?.trim();
+  if (resendKey) {
+    resendClient = new Resend(resendKey);
+    console.log('[Email] Resend client configured.');
+  }
+} catch (err) {
+  // Not fatal — we'll fall back to SMTP or dev-mode logging
+  console.warn('[Email] Resend client not available:', err?.message || err);
+}
 const Database = require("better-sqlite3");
 const path = require("path");
 const fs = require("fs");
@@ -200,6 +213,23 @@ async function sendOtpEmail(to, otp, purpose) {
     <p style="font-size:12px;color:#94a3b8;text-align:center;margin:0;">This code expires in <strong>10 minutes</strong>.</p>
   </div>
 </body></html>`;
+
+  // Prefer Resend API (HTTPS) when configured — works reliably on Render
+  if (resendClient) {
+    try {
+      await resendClient.emails.send({
+        from: emailFrom || `no-reply@smartsplit.local`,
+        to,
+        subject,
+        html,
+      });
+      console.log(`[Email] OTP sent via Resend to ${to} (purpose: ${purpose})`);
+      return;
+    } catch (err) {
+      console.error(`[Email] Resend send failed: ${err.message}`);
+      // Fall through to SMTP/dev-mode fallback
+    }
+  }
 
   if (mailer) {
     try {
