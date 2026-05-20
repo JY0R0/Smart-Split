@@ -658,7 +658,10 @@ app.post("/api/auth/login", async (req, res) => {
     });
   } catch (error) {
     console.error('[Login] Unexpected error:', error.message, error.stack);
-    return res.status(500).json({ message: "Failed to log in user.", detail: error.message });
+    return res.status(500).json({
+      message: "Failed to log in user.",
+      detail: error?.message || "OTP email could not be sent. Check EMAIL_PROVIDER and email credentials.",
+    });
   }
 });
 
@@ -706,7 +709,10 @@ app.post("/api/auth/resend-otp", async (req, res) => {
     return res.status(200).json({ message: "A new code has been sent to your email." });
   } catch (error) {
     console.error(error);
-    return res.status(500).json({ message: "Failed to resend code." });
+    return res.status(500).json({
+      message: "Failed to resend code.",
+      detail: error?.message || "OTP email could not be sent. Check EMAIL_PROVIDER and email credentials.",
+    });
   }
 });
 
@@ -733,7 +739,10 @@ app.post("/api/auth/passwordless/initiate", async (req, res) => {
     return res.status(200).json({ userId: user.id, message: "Verification code sent to your email." });
   } catch (error) {
     console.error(error);
-    return res.status(500).json({ message: "Failed to initiate passwordless login." });
+    return res.status(500).json({
+      message: "Failed to initiate passwordless login.",
+      detail: error?.message || "OTP email could not be sent. Check EMAIL_PROVIDER and email credentials.",
+    });
   }
 });
 
