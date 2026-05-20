@@ -4,15 +4,14 @@ import { useAuth } from '../context/AuthContext'
 import OtpInput from '../components/OtpInput'
 import apiClient from '../services/apiClient'
 
-const STEPS = { CREDENTIALS: 'credentials', MFA: 'mfa' }
+const STEPS = { EMAIL: 'email', OTP: 'otp' }
 
 export default function Login() {
   const navigate = useNavigate()
   const { login } = useAuth()
 
-  const [step, setStep] = useState(STEPS.CREDENTIALS)
+  const [step, setStep] = useState(STEPS.EMAIL)
   const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
   const [otp, setOtp] = useState('')
   const [userId, setUserId] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -20,28 +19,22 @@ export default function Login() {
   const [resendMsg, setResendMsg] = useState('')
   const [resendCooldown, setResendCooldown] = useState(false)
 
-  async function handleLogin(event) {
+  async function handleInitiate(event) {
     event.preventDefault()
     setLoading(true)
     setError('')
     try {
-      const payload = await login({ email, password })
-      // If MFA is required, server returns { mfaRequired: true, userId }
-      if (payload?.mfaRequired) {
-        setUserId(payload.userId)
-        setStep(STEPS.MFA)
-        return
-      }
-      const target = payload?.user?.role === 'admin' ? '/admin' : '/dashboard'
-      navigate(target, { replace: true })
+      const { data } = await apiClient.post('/auth/passwordless/initiate', { email })
+      setUserId(data.userId)
+      setStep(STEPS.OTP)
     } catch (loginError) {
-      setError(loginError?.response?.data?.message || loginError.message || 'Unable to log in.')
+      setError(loginError?.response?.data?.message || loginError.message || 'Unable to send code.')
     } finally {
       setLoading(false)
     }
   }
 
-  async function handleMfaVerify(event) {
+  async function handleOtpVerify(event) {
     event.preventDefault()
     if (otp.length < 6) { setError('Please enter the full 6-digit code.'); return }
     setLoading(true)
@@ -85,10 +78,10 @@ export default function Login() {
           <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-teal-600 to-emerald-400 text-xl font-bold text-white shadow-lg shadow-teal-500/25">
             S
           </div>
-          {step === STEPS.CREDENTIALS ? (
+          {step === STEPS.EMAIL ? (
             <>
-              <h1 className="text-2xl font-bold text-slate-900">Welcome back</h1>
-              <p className="mt-1 text-sm text-slate-500">Sign in to Smart Split to manage your expenses</p>
+              <h1 className="text-2xl font-bold text-slate-900">Sign in with email code</h1>
+              <p className="mt-1 text-sm text-slate-500">We will send a 6-digit OTP to your email</p>
             </>
           ) : (
             <>
@@ -103,9 +96,9 @@ export default function Login() {
         {/* Card */}
         <div className="rounded-3xl border border-slate-200/60 bg-white/90 p-6 shadow-xl shadow-slate-200/50 backdrop-blur-lg sm:p-8">
 
-          {/* ── Step 1: Credentials ── */}
-          {step === STEPS.CREDENTIALS && (
-            <form onSubmit={handleLogin} className="grid gap-5">
+          {/* ── Step 1: Email ── */}
+          {step === STEPS.EMAIL && (
+            <form onSubmit={handleInitiate} className="grid gap-5">
               <label htmlFor="login-email" className="grid gap-1.5">
                 <span className="text-sm font-semibold text-slate-700">Email</span>
                 <input
@@ -120,20 +113,6 @@ export default function Login() {
                 />
               </label>
 
-              <label htmlFor="login-password" className="grid gap-1.5">
-                <span className="text-sm font-semibold text-slate-700">Password</span>
-                <input
-                  id="login-password"
-                  type="password"
-                  className="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm outline-none transition-all duration-200 placeholder:text-slate-400 focus:border-teal-400 focus:bg-white focus:ring-4 focus:ring-teal-100"
-                  placeholder="••••••••"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  autoComplete="current-password"
-                />
-              </label>
-
               {error && (
                 <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
                   {error}
@@ -144,18 +123,18 @@ export default function Login() {
                 {loading ? (
                   <span className="flex items-center justify-center gap-2">
                     <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-                    Signing in…
+                    Sending code…
                   </span>
-                ) : 'Sign In'}
+                ) : 'Send OTP'}
               </button>
             </form>
           )}
 
-          {/* ── Step 2: MFA OTP ── */}
-          {step === STEPS.MFA && (
-            <form onSubmit={handleMfaVerify} className="grid gap-6">
+          {/* ── Step 2: OTP ── */}
+          {step === STEPS.OTP && (
+            <form onSubmit={handleOtpVerify} className="grid gap-6">
               <div className="rounded-xl border border-teal-100 bg-teal-50 px-4 py-3 text-center text-sm text-teal-800">
-                🔐 Two-factor authentication is enabled. The code expires in <strong>10 minutes</strong>.
+                Use the code we sent to your inbox. It expires in <strong>10 minutes</strong>.
               </div>
 
               <OtpInput length={6} value={otp} onChange={setOtp} disabled={loading} />
@@ -186,7 +165,7 @@ export default function Login() {
                 <button
                   type="button"
                   className="text-slate-500 hover:text-slate-700 transition"
-                  onClick={() => { setStep(STEPS.CREDENTIALS); setError(''); setOtp('') }}
+                  onClick={() => { setStep(STEPS.EMAIL); setError(''); setOtp('') }}
                 >
                   ← Back
                 </button>

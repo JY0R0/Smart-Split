@@ -657,6 +657,8 @@ app.post("/api/auth/login/verify", async (req, res) => {
     if (!result.valid) {
       return res.status(400).json({ message: result.reason });
     }
+    // Any successful login OTP proves mailbox ownership.
+    db.prepare("UPDATE users SET email_verified = 1 WHERE id = ?").run(Number(userId));
     const user = db.prepare("SELECT id, name, email, role FROM users WHERE id = ?").get(Number(userId));
     if (!user) return res.status(404).json({ message: "User not found." });
     const token = jwt.sign(
