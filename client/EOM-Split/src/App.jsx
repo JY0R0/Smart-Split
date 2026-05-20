@@ -1,6 +1,6 @@
 import React from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
-import { Login, Register, Dashboard, Groups, Expenses, Settlements, Profile, AdminDashboard } from './Pages'
+import { Login, Register, Dashboard, Groups, Expenses, Settlements, Profile, AdminDashboard, GoogleAuthCallback } from './Pages'
 import { useAuth } from './context/AuthContext'
 import ProtectedRoute from './components/ProtectedRoute'
 import AppShell from './layouts/AppShell'
@@ -22,6 +22,7 @@ export default function App() {
             path="/login"
             element={isAuthenticated ? <Navigate to={authenticatedHome} replace /> : <Login />}
           />
+          <Route path="/auth/google/callback" element={<GoogleAuthCallback />} />
           <Route
             path="/register"
             element={isAuthenticated ? <Navigate to={authenticatedHome} replace /> : <Register />}

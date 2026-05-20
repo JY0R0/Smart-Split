@@ -1,18 +1,34 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import apiClient from '../services/apiClient'
 
 export default function Login() {
   const navigate = useNavigate()
   const { login } = useAuth()
-  const googleTokenClientRef = useRef(null)
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [googleLoading, setGoogleLoading] = useState(false)
+
+  const googleAuthUrl = useMemo(() => {
+    const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || ''
+    const redirectUri = import.meta.env.VITE_GOOGLE_REDIRECT_URI || `${window.location.origin}/auth/google/callback`
+
+    if (!clientId) return ''
+
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      response_type: 'token',
+      scope: 'openid email profile',
+      include_granted_scopes: 'true',
+      prompt: 'select_account',
+    })
+
+    return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`
+  }, [])
 
   async function handleLogin(event) {
     event.preventDefault()
@@ -29,109 +45,16 @@ export default function Login() {
     }
   }
 
-  async function handleGoogleSignIn(idToken) {
-    setGoogleLoading(true)
-    setError('')
-    try {
-      const { data: payload } = await apiClient.post('/auth/google/callback', { idToken })
-      login.__saveSession(payload)
-      const target = payload?.user?.role === 'admin' ? '/admin' : '/dashboard'
-      navigate(target, { replace: true })
-    } catch (err) {
-      setError(err?.response?.data?.message || err.message || 'Google sign-in failed.')
-    } finally {
-      setGoogleLoading(false)
-    }
-  }
-
-  async function handleGooglePopupClick() {
-    const tokenClient = googleTokenClientRef.current
-    if (!tokenClient) {
-      setError('Google Sign-In is not ready yet. Please try again in a moment.')
+  function handleGoogleRedirect() {
+    if (!googleAuthUrl) {
+      setError('Google Sign-In is not configured. Set VITE_GOOGLE_CLIENT_ID.')
       return
     }
 
     setGoogleLoading(true)
     setError('')
-    try {
-      tokenClient.requestAccessToken()
-    } catch (err) {
-      setGoogleLoading(false)
-      setError(err?.message || 'Google Sign-In failed to start.')
-    }
+    window.location.assign(googleAuthUrl)
   }
-
-  // Initialize Google OAuth popup flow (poll until SDK loads)
-  useEffect(() => {
-    let mounted = true
-    let attempts = 0
-    const maxAttempts = 20
-    const intervalMs = 500
-
-    const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || ''
-    if (!clientId) {
-      console.warn('VITE_GOOGLE_CLIENT_ID is not set')
-      return
-    }
-
-    function tryInit() {
-      if (!mounted) return
-      if (window.google && window.google.accounts && window.google.accounts.oauth2) {
-        try {
-          googleTokenClientRef.current = window.google.accounts.oauth2.initTokenClient({
-            client_id: clientId,
-            scope: 'openid email profile',
-            callback: async (response) => {
-              if (!response?.access_token) {
-                setGoogleLoading(false)
-                setError('Google did not return an access token.')
-                return
-              }
-
-              try {
-                const profileResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
-                  headers: {
-                    Authorization: `Bearer ${response.access_token}`,
-                  },
-                })
-
-                if (!profileResponse.ok) {
-                  throw new Error('Unable to read Google profile.')
-                }
-
-                const profile = await profileResponse.json()
-                const { data: payload } = await apiClient.post('/auth/google/callback', { profile })
-                login.__saveSession(payload)
-                const target = payload?.user?.role === 'admin' ? '/admin' : '/dashboard'
-                navigate(target, { replace: true })
-              } catch (err) {
-                setError(err?.response?.data?.message || err.message || 'Google sign-in failed.')
-              } finally {
-                setGoogleLoading(false)
-              }
-            },
-          })
-        } catch (err) {
-          console.error('Failed to initialize Google Sign-In', err)
-        }
-        return
-      }
-
-      attempts += 1
-      if (attempts < maxAttempts) {
-        setTimeout(tryInit, intervalMs)
-      } else {
-        console.warn('Google Sign-In SDK not available after polling')
-      }
-    }
-
-    tryInit()
-
-    return () => {
-      mounted = false
-      googleTokenClientRef.current = null
-    }
-  }, [])
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-(--bg) px-4 py-12">
@@ -158,7 +81,7 @@ export default function Login() {
           <div className="mb-6">
             <button
               type="button"
-              onClick={handleGooglePopupClick}
+              onClick={handleGoogleRedirect}
               disabled={googleLoading}
               className="btn btn-secondary w-full py-3 text-base"
             >
