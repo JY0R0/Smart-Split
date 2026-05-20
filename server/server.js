@@ -153,6 +153,7 @@ const adminName = (process.env.ADMIN_NAME || "Smart Split Admin").trim();
 const emailUser = process.env.EMAIL_USER?.trim();
 const emailPass = process.env.EMAIL_PASS?.trim();
 const emailFrom = process.env.EMAIL_FROM || (emailUser ? `Smart Split <${emailUser}>` : null);
+const resendFrom = process.env.RESEND_FROM?.trim() || emailFrom || 'onboarding@resend.dev';
 
 let mailer = null;
 if (emailUser && emailPass) {
@@ -217,12 +218,15 @@ async function sendOtpEmail(to, otp, purpose) {
   // Prefer Resend API (HTTPS) when configured — works reliably on Render
   if (resendClient) {
     try {
-      await resendClient.emails.send({
-        from: emailFrom || `no-reply@smartsplit.local`,
+      const resendResult = await resendClient.emails.send({
+        from: resendFrom,
         to,
         subject,
         html,
       });
+      if (resendResult?.error) {
+        throw new Error(resendResult.error.message || 'Resend rejected the email request.');
+      }
       console.log(`[Email] OTP sent via Resend to ${to} (purpose: ${purpose})`);
       return;
     } catch (err) {
