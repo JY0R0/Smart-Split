@@ -61,9 +61,12 @@ export function AuthProvider({ children }) {
   login.__saveSession = __saveSession
 
   async function register({ name, email, password }) {
-    // Initiate registration — returns { userId }
-    const { data } = await apiClient.post('/auth/register/initiate', { name, email, password })
-    return data
+    const { data: payload } = await apiClient.post('/auth/register', { name, email, password })
+    const nextUser = withRole(payload.user)
+    saveSession({ token: payload.token, user: nextUser })
+    setToken(payload.token)
+    setUser(nextUser)
+    return { ...payload, user: nextUser }
   }
 
   // Attach __saveSession so Register step-2 can call it

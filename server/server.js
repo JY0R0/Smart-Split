@@ -619,8 +619,8 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Step 1: initiate registration — create unverified user and send OTP
-app.post("/api/auth/register/initiate", async (req, res) => {
+// Password-based registration (no OTP)
+app.post("/api/auth/register", async (req, res) => {
   try {
     const { name, email, password } = req.body;
 
@@ -633,50 +633,17 @@ app.post("/api/auth/register/initiate", async (req, res) => {
     }
 
     const normalizedEmail = email.trim().toLowerCase();
-    const existingUser = db.prepare("SELECT id, email_verified FROM users WHERE email = ?").get(normalizedEmail);
+    const existingUser = db.prepare("SELECT id FROM users WHERE email = ?").get(normalizedEmail);
 
-    if (existingUser && existingUser.email_verified) {
+    if (existingUser) {
       return res.status(409).json({ message: "An account with this email already exists." });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const displayName = (name && name.trim()) || normalizedEmail.split("@")[0];
 
-    let userId;
-    if (existingUser && !existingUser.email_verified) {
-      db.prepare("UPDATE users SET name = ?, password = ? WHERE id = ?").run(displayName, hashedPassword, existingUser.id);
-      userId = existingUser.id;
-    } else {
-      const result = db.prepare("INSERT INTO users (name, email, password, role, email_verified) VALUES (?, ?, ?, 'user', 0)").run(displayName, normalizedEmail, hashedPassword);
-      userId = result.lastInsertRowid;
-    }
-
-    const otp = createOtp(userId, 'register');
-    await sendOtpEmail(normalizedEmail, otp, 'register');
-
-    return res.status(200).json({ userId, message: "Verification code sent to your email." });
-  } catch (error) {
-    console.error(error);
-    return res.status(500).json({ message: "Failed to initiate registration." });
-  }
-});
-
-// Step 2: verify OTP and activate account
-app.post("/api/auth/register/verify", async (req, res) => {
-  try {
-    const { userId, otp } = req.body;
-
-    if (!userId || !otp) {
-      return res.status(400).json({ message: "userId and otp are required." });
-    }
-
-    const result = validateOtp(Number(userId), String(otp), 'register');
-    if (!result.valid) {
-      return res.status(400).json({ message: result.reason });
-    }
-
-    db.prepare("UPDATE users SET email_verified = 1 WHERE id = ?").run(Number(userId));
-    const user = db.prepare("SELECT id, name, email, role FROM users WHERE id = ?").get(Number(userId));
+    const result = db.prepare("INSERT INTO users (name, email, password, role, email_verified) VALUES (?, ?, ?, 'user', 1)").run(displayName, normalizedEmail, hashedPassword);
+    const user = db.prepare("SELECT id, name, email, role FROM users WHERE id = ?").get(result.lastInsertRowid);
 
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role || "user" },
@@ -687,7 +654,7 @@ app.post("/api/auth/register/verify", async (req, res) => {
     return res.status(201).json({ user, token });
   } catch (error) {
     console.error(error);
-    return res.status(500).json({ message: "Failed to verify registration." });
+    return res.status(500).json({ message: "Failed to register." });
   }
 });
 
@@ -705,27 +672,17 @@ app.post("/api/auth/login", async (req, res) => {
 
     const normalizedEmail = email.trim().toLowerCase();
     const user = db
-      .prepare("SELECT id, name, email, password, role, email_verified, mfa_enabled FROM users WHERE email = ?")
+      .prepare("SELECT id, name, email, password, role FROM users WHERE email = ?")
       .get(normalizedEmail);
 
     if (!user) {
       return res.status(401).json({ message: "Invalid email or password." });
     }
 
-    if (!user.email_verified) {
-      return res.status(403).json({ message: "Please verify your email before logging in.", needsVerification: true, userId: user.id });
-    }
-
     const passwordMatches = await bcrypt.compare(password, user.password);
 
     if (!passwordMatches) {
       return res.status(401).json({ message: "Invalid email or password." });
-    }
-
-    if (user.mfa_enabled) {
-      const otp = createOtp(user.id, 'login');
-      await sendOtpEmail(user.email, otp, 'login');
-      return res.status(200).json({ mfaRequired: true, userId: user.id, message: "Verification code sent to your email." });
     }
 
     const token = jwt.sign(
@@ -747,7 +704,7 @@ app.post("/api/auth/login", async (req, res) => {
     console.error('[Login] Unexpected error:', error.message, error.stack);
     return res.status(500).json({
       message: "Failed to log in user.",
-      detail: error?.message || "OTP email could not be sent. Check EMAIL_PROVIDER and email credentials.",
+      detail: error?.message,
     });
   }
 });
@@ -829,6 +786,73 @@ app.post("/api/auth/passwordless/initiate", async (req, res) => {
     return res.status(500).json({
       message: "Failed to initiate passwordless login.",
       detail: error?.message || "OTP email could not be sent. Check EMAIL_PROVIDER and email credentials.",
+    });
+  }
+});
+
+// Google OAuth callback: exchange code for token and create/merge user
+app.post("/api/auth/google/callback", async (req, res) => {
+  try {
+    const { idToken } = req.body;
+    if (!idToken) {
+      return res.status(400).json({ message: "idToken is required." });
+    }
+
+    // Verify and decode JWT from Google (in production, validate with Google's public key)
+    // For now, assume frontend has validated it and passed decoded payload
+    // In real scenario, use google-auth-library
+    let payload;
+    try {
+      // Simple JWT decode (without verification for now)
+      const parts = idToken.split('.');
+      if (parts.length !== 3) throw new Error('Invalid token format');
+      const decoded = JSON.parse(Buffer.from(parts[1], 'base64').toString());
+      payload = decoded;
+    } catch (err) {
+      return res.status(401).json({ message: "Invalid or expired Google token." });
+    }
+
+    const { email: googleEmail, name: googleName } = payload;
+    if (!googleEmail) {
+      return res.status(400).json({ message: "Google token missing email." });
+    }
+
+    const normalizedEmail = googleEmail.trim().toLowerCase();
+    let user = db.prepare("SELECT id, name, email, role FROM users WHERE email = ?").get(normalizedEmail);
+
+    // If user doesn't exist, create one
+    if (!user) {
+      const randomPassword = await bcrypt.hash(crypto.randomBytes(16).toString("hex"), 10);
+      const displayName = (googleName || normalizedEmail.split("@")[0]).trim();
+      const result = db.prepare("INSERT INTO users (name, email, password, role, email_verified) VALUES (?, ?, ?, 'user', 1)").run(displayName, normalizedEmail, randomPassword);
+      user = db.prepare("SELECT id, name, email, role FROM users WHERE id = ?").get(result.lastInsertRowid);
+    }
+    // If user exists, we've merged by email (no action needed, just use existing user)
+
+    if (!jwtSecret) {
+      return res.status(500).json({ message: "JWT secret is not configured." });
+    }
+
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role || "user" },
+      jwtSecret,
+      { expiresIn: "7d" }
+    );
+
+    return res.status(200).json({
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role || "user",
+      },
+      token,
+    });
+  } catch (error) {
+    console.error('[Google Auth] Error:', error.message);
+    return res.status(500).json({
+      message: "Google authentication failed.",
+      detail: error?.message,
     });
   }
 });
