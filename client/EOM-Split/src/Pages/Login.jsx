@@ -37,7 +37,8 @@ export default function Login() {
   async function handleOtpVerify(event) {
     event.preventDefault()
     if (otp.length < 6) { setError('Please enter the full 6-digit code.'); return }
-    setLoading(true)
+  const [otp, setOtp] = useState('')
+  const [password, setPassword] = useState('')
     setError('')
     try {
       const { data: payload } = await apiClient.post('/auth/login/verify', { userId, otp })
@@ -49,9 +50,23 @@ export default function Login() {
     } finally {
       setLoading(false)
     }
-  }
+      if (password && password.trim().length > 0) {
+        // Password login flow
+        const payload = await login({ email, password })
+        if (payload?.mfaRequired) {
+          setUserId(payload.userId)
+          setStep(STEPS.OTP)
+          return
+        }
+        const target = payload?.user?.role === 'admin' ? '/admin' : '/dashboard'
+        navigate(target, { replace: true })
+        return
+      }
 
-  async function handleResend() {
+      // Passwordless flow
+      const { data } = await apiClient.post('/auth/passwordless/initiate', { email })
+      setUserId(data.userId)
+      setStep(STEPS.OTP)
     setResendMsg('')
     setError('')
     setResendCooldown(true)
