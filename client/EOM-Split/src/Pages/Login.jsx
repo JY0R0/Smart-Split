@@ -12,6 +12,7 @@ export default function Login() {
 
   const [step, setStep] = useState(STEPS.EMAIL)
   const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
   const [otp, setOtp] = useState('')
   const [userId, setUserId] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -23,35 +24,10 @@ export default function Login() {
     event.preventDefault()
     setLoading(true)
     setError('')
+    setResendMsg('')
     try {
-      const { data } = await apiClient.post('/auth/passwordless/initiate', { email })
-      setUserId(data.userId)
-      setStep(STEPS.OTP)
-    } catch (loginError) {
-      setError(loginError?.response?.data?.message || loginError.message || 'Unable to send code.')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  async function handleOtpVerify(event) {
-    event.preventDefault()
-    if (otp.length < 6) { setError('Please enter the full 6-digit code.'); return }
-  const [otp, setOtp] = useState('')
-  const [password, setPassword] = useState('')
-    setError('')
-    try {
-      const { data: payload } = await apiClient.post('/auth/login/verify', { userId, otp })
-      login.__saveSession(payload)
-      const target = payload?.user?.role === 'admin' ? '/admin' : '/dashboard'
-      navigate(target, { replace: true })
-    } catch (err) {
-      setError(err?.response?.data?.message || 'Verification failed.')
-    } finally {
-      setLoading(false)
-    }
-      if (password && password.trim().length > 0) {
-        // Password login flow
+      if (password.trim().length > 0) {
+        // Password login; backend will request OTP only if MFA is enabled.
         const payload = await login({ email, password })
         if (payload?.mfaRequired) {
           setUserId(payload.userId)
@@ -63,10 +39,38 @@ export default function Login() {
         return
       }
 
-      // Passwordless flow
+      // Passwordless login: send OTP directly to the email.
       const { data } = await apiClient.post('/auth/passwordless/initiate', { email })
       setUserId(data.userId)
       setStep(STEPS.OTP)
+    } catch (loginError) {
+      setError(loginError?.response?.data?.message || loginError.message || 'Unable to continue sign in.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function handleOtpVerify(event) {
+    event.preventDefault()
+    if (otp.length < 6) {
+      setError('Please enter the full 6-digit code.')
+      return
+    }
+    setLoading(true)
+    setError('')
+    try {
+      const { data: payload } = await apiClient.post('/auth/login/verify', { userId, otp })
+      login.__saveSession(payload)
+      const target = payload?.user?.role === 'admin' ? '/admin' : '/dashboard'
+      navigate(target, { replace: true })
+    } catch (err) {
+      setError(err?.response?.data?.message || 'Verification failed.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function handleResend() {
     setResendMsg('')
     setError('')
     setResendCooldown(true)
@@ -95,8 +99,8 @@ export default function Login() {
           </div>
           {step === STEPS.EMAIL ? (
             <>
-              <h1 className="text-2xl font-bold text-slate-900">Sign in with email code</h1>
-              <p className="mt-1 text-sm text-slate-500">We will send a 6-digit OTP to your email</p>
+              <h1 className="text-2xl font-bold text-slate-900">Sign in</h1>
+              <p className="mt-1 text-sm text-slate-500">Use password, or leave it blank to sign in with email OTP</p>
             </>
           ) : (
             <>
@@ -128,6 +132,19 @@ export default function Login() {
                 />
               </label>
 
+              <label htmlFor="login-password" className="grid gap-1.5">
+                <span className="text-sm font-semibold text-slate-700">Password (optional)</span>
+                <input
+                  id="login-password"
+                  type="password"
+                  className="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm outline-none transition-all duration-200 placeholder:text-slate-400 focus:border-teal-400 focus:bg-white focus:ring-4 focus:ring-teal-100"
+                  placeholder="Enter password or leave blank for OTP"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="current-password"
+                />
+              </label>
+
               {error && (
                 <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
                   {error}
@@ -138,9 +155,9 @@ export default function Login() {
                 {loading ? (
                   <span className="flex items-center justify-center gap-2">
                     <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-                    Sending code…
+                    Processing…
                   </span>
-                ) : 'Send OTP'}
+                ) : 'Continue'}
               </button>
             </form>
           )}
