@@ -6,7 +6,7 @@ import apiClient from '../services/apiClient'
 export default function Login() {
   const navigate = useNavigate()
   const { login } = useAuth()
-  const googleButtonRef = useRef(null)
+  const googleTokenClientRef = useRef(null)
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -44,7 +44,24 @@ export default function Login() {
     }
   }
 
-  // Initialize Google Sign-In button (poll until SDK loads)
+  async function handleGooglePopupClick() {
+    const tokenClient = googleTokenClientRef.current
+    if (!tokenClient) {
+      setError('Google Sign-In is not ready yet. Please try again in a moment.')
+      return
+    }
+
+    setGoogleLoading(true)
+    setError('')
+    try {
+      tokenClient.requestAccessToken()
+    } catch (err) {
+      setGoogleLoading(false)
+      setError(err?.message || 'Google Sign-In failed to start.')
+    }
+  }
+
+  // Initialize Google OAuth popup flow (poll until SDK loads)
   useEffect(() => {
     let mounted = true
     let attempts = 0
@@ -59,26 +76,41 @@ export default function Login() {
 
     function tryInit() {
       if (!mounted) return
-      if (window.google && window.google.accounts && window.google.accounts.id) {
+      if (window.google && window.google.accounts && window.google.accounts.oauth2) {
         try {
-          window.google.accounts.id.initialize({
+          googleTokenClientRef.current = window.google.accounts.oauth2.initTokenClient({
             client_id: clientId,
-            callback: (response) => {
-              handleGoogleSignIn(response.credential)
+            scope: 'openid email profile',
+            callback: async (response) => {
+              if (!response?.access_token) {
+                setGoogleLoading(false)
+                setError('Google did not return an access token.')
+                return
+              }
+
+              try {
+                const profileResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+                  headers: {
+                    Authorization: `Bearer ${response.access_token}`,
+                  },
+                })
+
+                if (!profileResponse.ok) {
+                  throw new Error('Unable to read Google profile.')
+                }
+
+                const profile = await profileResponse.json()
+                const { data: payload } = await apiClient.post('/auth/google/callback', { profile })
+                login.__saveSession(payload)
+                const target = payload?.user?.role === 'admin' ? '/admin' : '/dashboard'
+                navigate(target, { replace: true })
+              } catch (err) {
+                setError(err?.response?.data?.message || err.message || 'Google sign-in failed.')
+              } finally {
+                setGoogleLoading(false)
+              }
             },
           })
-          const el = googleButtonRef.current
-          if (el) {
-            const width = Math.max(280, Math.floor(el.getBoundingClientRect().width || el.clientWidth || 0))
-            el.innerHTML = ''
-            window.google.accounts.id.renderButton(el, {
-              theme: 'outline',
-              size: 'large',
-              width,
-              text: 'signin_with',
-              shape: 'rectangular',
-            })
-          }
         } catch (err) {
           console.error('Failed to initialize Google Sign-In', err)
         }
@@ -95,36 +127,14 @@ export default function Login() {
 
     tryInit()
 
-    const resizeObserver =
-      googleButtonRef.current && 'ResizeObserver' in window
-        ? new ResizeObserver(() => {
-            if (mounted && window.google?.accounts?.id && googleButtonRef.current) {
-              const el = googleButtonRef.current
-              const width = Math.max(280, Math.floor(el.getBoundingClientRect().width || el.clientWidth || 0))
-              el.innerHTML = ''
-              window.google.accounts.id.renderButton(el, {
-                theme: 'outline',
-                size: 'large',
-                width,
-                text: 'signin_with',
-                shape: 'rectangular',
-              })
-            }
-          })
-        : null
-
-    if (resizeObserver && googleButtonRef.current) {
-      resizeObserver.observe(googleButtonRef.current)
-    }
-
     return () => {
       mounted = false
-      if (resizeObserver) resizeObserver.disconnect()
+      googleTokenClientRef.current = null
     }
   }, [])
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[var(--bg)] px-4 py-12">
+    <div className="flex min-h-screen items-center justify-center bg-(--bg) px-4 py-12">
       {/* Decorative gradient blobs */}
       <div className="pointer-events-none fixed inset-0 overflow-hidden">
         <div className="absolute -left-32 -top-32 h-96 w-96 rounded-full bg-teal-400/10 blur-3xl" />
@@ -134,7 +144,7 @@ export default function Login() {
       <div className="relative w-full max-w-md">
         {/* Brand */}
         <div className="mb-8 text-center">
-          <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-teal-600 to-emerald-400 text-xl font-bold text-white shadow-lg shadow-teal-500/25">
+          <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-linear-to-br from-teal-600 to-emerald-400 text-xl font-bold text-white shadow-lg shadow-teal-500/25">
             S
           </div>
           <h1 className="text-2xl font-bold text-slate-900">Sign In</h1>
@@ -146,7 +156,26 @@ export default function Login() {
 
           {/* Google Sign-In Button */}
           <div className="mb-6">
-            <div ref={googleButtonRef} id="google-signin-button" className="flex w-full justify-center" />
+            <button
+              type="button"
+              onClick={handleGooglePopupClick}
+              disabled={googleLoading}
+              className="btn btn-secondary w-full py-3 text-base"
+            >
+              {googleLoading ? (
+                <span className="flex items-center justify-center gap-2">
+                  <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-slate-400/40 border-t-slate-700" />
+                  Opening Google…
+                </span>
+              ) : (
+                <span className="flex items-center justify-center gap-2">
+                  <span className="grid h-5 w-5 place-items-center rounded-full bg-white text-xs font-black text-red-500 shadow-sm">
+                    G
+                  </span>
+                  Continue with Google
+                </span>
+              )}
+            </button>
           </div>
 
           {/* Divider */}

@@ -793,26 +793,37 @@ app.post("/api/auth/passwordless/initiate", async (req, res) => {
 // Google OAuth callback: exchange code for token and create/merge user
 app.post("/api/auth/google/callback", async (req, res) => {
   try {
-    const { idToken } = req.body;
-    if (!idToken) {
-      return res.status(400).json({ message: "idToken is required." });
+    const { idToken, profile } = req.body;
+
+    let googleEmail = null;
+    let googleName = null;
+
+    if (profile && typeof profile === 'object') {
+      googleEmail = profile.email || null;
+      googleName = profile.name || null;
+    } else {
+      if (!idToken) {
+        return res.status(400).json({ message: "idToken or profile is required." });
+      }
+
+      // Verify and decode JWT from Google (in production, validate with Google's public key)
+      // For now, assume frontend has validated it and passed decoded payload
+      // In real scenario, use google-auth-library
+      let payload;
+      try {
+        // Simple JWT decode (without verification for now)
+        const parts = idToken.split('.');
+        if (parts.length !== 3) throw new Error('Invalid token format');
+        const decoded = JSON.parse(Buffer.from(parts[1], 'base64').toString());
+        payload = decoded;
+      } catch (err) {
+        return res.status(401).json({ message: "Invalid or expired Google token." });
+      }
+
+      googleEmail = payload.email || null;
+      googleName = payload.name || null;
     }
 
-    // Verify and decode JWT from Google (in production, validate with Google's public key)
-    // For now, assume frontend has validated it and passed decoded payload
-    // In real scenario, use google-auth-library
-    let payload;
-    try {
-      // Simple JWT decode (without verification for now)
-      const parts = idToken.split('.');
-      if (parts.length !== 3) throw new Error('Invalid token format');
-      const decoded = JSON.parse(Buffer.from(parts[1], 'base64').toString());
-      payload = decoded;
-    } catch (err) {
-      return res.status(401).json({ message: "Invalid or expired Google token." });
-    }
-
-    const { email: googleEmail, name: googleName } = payload;
     if (!googleEmail) {
       return res.status(400).json({ message: "Google token missing email." });
     }
