@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import apiClient from '../services/apiClient'
@@ -6,6 +6,7 @@ import apiClient from '../services/apiClient'
 export default function Login() {
   const navigate = useNavigate()
   const { login } = useAuth()
+  const googleButtonRef = useRef(null)
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -44,7 +45,7 @@ export default function Login() {
   }
 
   // Initialize Google Sign-In button (poll until SDK loads)
-  React.useEffect(() => {
+  useEffect(() => {
     let mounted = true
     let attempts = 0
     const maxAttempts = 20
@@ -66,9 +67,17 @@ export default function Login() {
               handleGoogleSignIn(response.credential)
             },
           })
-          const el = document.getElementById('google-signin-button')
+          const el = googleButtonRef.current
           if (el) {
-            window.google.accounts.id.renderButton(el, { theme: 'outline', size: 'large', width: '100%' })
+            const width = Math.max(280, Math.floor(el.getBoundingClientRect().width || el.clientWidth || 0))
+            el.innerHTML = ''
+            window.google.accounts.id.renderButton(el, {
+              theme: 'outline',
+              size: 'large',
+              width,
+              text: 'signin_with',
+              shape: 'rectangular',
+            })
           }
         } catch (err) {
           console.error('Failed to initialize Google Sign-In', err)
@@ -85,8 +94,32 @@ export default function Login() {
     }
 
     tryInit()
+
+    const resizeObserver =
+      googleButtonRef.current && 'ResizeObserver' in window
+        ? new ResizeObserver(() => {
+            if (mounted && window.google?.accounts?.id && googleButtonRef.current) {
+              const el = googleButtonRef.current
+              const width = Math.max(280, Math.floor(el.getBoundingClientRect().width || el.clientWidth || 0))
+              el.innerHTML = ''
+              window.google.accounts.id.renderButton(el, {
+                theme: 'outline',
+                size: 'large',
+                width,
+                text: 'signin_with',
+                shape: 'rectangular',
+              })
+            }
+          })
+        : null
+
+    if (resizeObserver && googleButtonRef.current) {
+      resizeObserver.observe(googleButtonRef.current)
+    }
+
     return () => {
       mounted = false
+      if (resizeObserver) resizeObserver.disconnect()
     }
   }, [])
 
@@ -113,7 +146,7 @@ export default function Login() {
 
           {/* Google Sign-In Button */}
           <div className="mb-6">
-            <div id="google-signin-button" className="w-full" />
+            <div ref={googleButtonRef} id="google-signin-button" className="flex w-full justify-center" />
           </div>
 
           {/* Divider */}
